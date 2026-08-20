@@ -6,7 +6,11 @@ export type EdgeType =
   | 'CALLS'
   | 'REFERENCES'
   | 'EXTENDS'
-  | 'IMPLEMENTS';
+  | 'IMPLEMENTS'
+  // method → configuration constant it reads (e.g. AdapterConstants.BC_APP_CONNECTOR_FLAG)
+  | 'READS_CONFIG'
+  // method → field/property it reads from a model/config object (e.g. appConfig.getEnabled())
+  | 'READS_FIELD';
 
 /** Describes how safely an edge was recovered from source. */
 export type EdgeResolution = 'structural' | 'ast' | 'heuristic';

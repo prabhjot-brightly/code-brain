@@ -95,26 +95,24 @@ export function similarity(a: Float32Array, b: Float32Array): number {
  * window (~400 word-pieces) so nothing is silently truncated by the model.
  */
 export function nodeToText(node: CodeNode, firstSourceLine = ''): string {
-  // Derive a short class/package label from the file path.
   const parts     = node.filePath.replace(/\\/g, '/').split('/');
-  const className = (parts.at(-1) ?? '').replace(/\.\w+$/, '');   // strip .java/.ts
+  const className = (parts.at(-1) ?? '').replace(/\.\w+$/, '');
   const pkg       = parts.at(-2) ?? '';
   const location  = pkg ? `${pkg}/${className}` : className;
 
-  // Prefer body lines from sourceCode — they carry the semantic substance.
-  // Fall back to the signature string passed by the caller.
-  const rawBody = (node.sourceCode ?? '').trim();
-  const bodyText = rawBody.length > 0
-    ? rawBody
-        .split('\n')
-        .slice(0, 8)                          // first 8 lines of method body
-        .map(l => l.trim())
-        .filter(l => l.length > 0)
-        .join(' ')
-        .replace(/\s+/g, ' ')
-    : firstSourceLine.trim();
+  // Signature only — no body lines in the embedding; keeps vectors focused.
+  const signature = (node.firstLine ?? firstSourceLine ?? node.name).trim();
 
-  const content = bodyText.slice(0, 400);
+  // Append config constant names so flag-name queries hit the reader directly.
+  const rawBody = node.sourceCode ?? '';
+  const constMatches = rawBody.match(/\bAdapterConstants\.(\w+)|getConfigurationItem\(([^)]+)\)/g) ?? [];
+  const constNames = constMatches
+    .map(m => m.replace(/getConfigurationItem\(|AdapterConstants\.|\)/g, '').trim())
+    .filter(Boolean)
+    .slice(0, 4)
+    .join(' ');
+
+  const content = (signature + (constNames ? ` config:${constNames}` : '')).slice(0, 400);
 
   return content
     ? `${node.type} ${node.name} in ${location}: ${content}`

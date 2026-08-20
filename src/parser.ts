@@ -2,9 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import Parser from 'tree-sitter';
-import treeSitterTypescript from 'tree-sitter-typescript';
 import treeSitterJava from 'tree-sitter-java';
-const { typescript, tsx } = treeSitterTypescript as { typescript: unknown; tsx: unknown };
 import type { CodeNode, CodeEdge, NodeType } from './types.js';
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
@@ -68,7 +66,7 @@ export interface ParseResult {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Tree-sitter parser  (TypeScript / TSX / JavaScript / JSX)
+// Tree-sitter parser  (Java)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 interface SyntaxNode {
@@ -80,165 +78,8 @@ interface SyntaxNode {
   childForFieldName(name: string): SyntaxNode | null;
 }
 
-const tsParser  = new Parser() as { setLanguage(l: unknown): void; parse(s: string): { rootNode: SyntaxNode } };
-const tsxParser = new Parser() as typeof tsParser;
-const javaParser = new Parser() as typeof tsParser;
-tsParser.setLanguage(typescript);
-tsxParser.setLanguage(tsx);
+const javaParser = new Parser() as { setLanguage(l: unknown): void; parse(s: string): { rootNode: SyntaxNode } };
 javaParser.setLanguage(treeSitterJava as unknown);
-
-const TS_KIND_MAP: Record<string, NodeType> = {
-  class_declaration:          'CLASS',
-  abstract_class_declaration: 'CLASS',
-  function_declaration:       'FUNCTION',
-  function_expression:        'FUNCTION',
-  arrow_function:             'FUNCTION',
-  method_definition:          'METHOD',
-  interface_declaration:      'INTERFACE',
-};
-
-/**
- * Extract the callee name from a call_expression node.
- *   foo()           → "foo"
- *   obj.method()    → "method"
- *   this.run()      → "run"
- *   super.init()    → "init"
- * Returns null for complex callees (e.g. IIFE, computed members).
- */
-function extractCalleeName(callNode: SyntaxNode): string | null {
-  const fn = callNode.childForFieldName('function');
-  if (!fn) return null;
-  if (fn.type === 'identifier') return fn.text;
-  if (fn.type === 'member_expression') {
-    const prop = fn.childForFieldName('property');
-    return prop?.text ?? null;
-  }
-  return null;
-}
-
-function parseTsJs(absPath: string, relPath: string, source: string): ParseResult {
-  const lines  = source.split('\n');
-  const nodes: CodeNode[] = [];
-  const edges: CodeEdge[] = [];
-
-  const fileNode: CodeNode = {
-    id: nodeId(relPath, 'FILE', relPath, 0),
-    type: 'FILE',
-    name: path.basename(relPath),
-    filePath: relPath,
-    startLine: 1,
-    endLine: lines.length,
-    hash: contentHash(source),
-  };
-  nodes.push(fileNode);
-
-  const parser = absPath.endsWith('.tsx') ? tsxParser : tsParser;
-  const tree   = parser.parse(source);
-
-  // Stack of function/method nodes currently being visited.
-  // CALLS edges are attributed to the innermost enclosing function/method.
-  const ownerStack: CodeNode[] = [];
-  // De-duplicate CALLS edges per (caller, callee) pair.
-  const callsSeen = new Set<string>();
-
-  function visit(node: SyntaxNode, parentId: string): void {
-    const kind = TS_KIND_MAP[node.type];
-
-    if (kind !== undefined) {
-      const nameNode = node.childForFieldName('name');
-      const name     = nameNode?.text ?? '<anonymous>';
-      const start    = node.startPosition.row + 1;
-      const end      = node.endPosition.row + 1;
-
-      const codeNode: CodeNode = {
-        id:            nodeId(relPath, kind, name, start),
-        type:          kind,
-        name,
-        filePath:      relPath,
-        startLine:     start,
-        endLine:       end,
-        hash:          contentHash(lines.slice(start - 1, end).join('\n')),
-        documentation: extractLeadingComment(lines, start),
-      };
-      nodes.push(codeNode);
-      edges.push({ source: parentId,    target: codeNode.id, type: 'CONTAINS' });
-      if (kind !== 'METHOD') {
-        edges.push({ source: fileNode.id, target: codeNode.id, type: 'DEFINES'  });
-      }
-
-      // EXTENDS / IMPLEMENTS
-      if (kind === 'CLASS') {
-        const heritage = node.namedChildren.find((c) => c.type === 'class_heritage');
-        if (heritage) {
-          for (const clause of heritage.namedChildren) {
-            if (clause.type === 'extends_clause') {
-              for (const t of clause.namedChildren) {
-                edges.push({ source: codeNode.id, target: t.text, type: 'EXTENDS' });
-              }
-            }
-            if (clause.type === 'implements_clause') {
-              for (const t of clause.namedChildren) {
-                edges.push({ source: codeNode.id, target: t.text, type: 'IMPLEMENTS' });
-              }
-            }
-          }
-        }
-      }
-
-      // Push onto owner stack while visiting children of a function/method
-      // so that any call_expression nodes inside are attributed to this owner.
-      if (kind === 'FUNCTION' || kind === 'METHOD') {
-        ownerStack.push(codeNode);
-        for (const child of node.namedChildren) visit(child, codeNode.id);
-        ownerStack.pop();
-      } else {
-        for (const child of node.namedChildren) visit(child, codeNode.id);
-      }
-      return;
-    }
-
-    // ── CALLS: detect function/method invocations ─────────────────────────────
-    if (node.type === 'call_expression') {
-      const owner = ownerStack[ownerStack.length - 1];
-      if (owner) {
-        const callee = extractCalleeName(node);
-        // Skip builtins/keywords and self-recursive calls under the same name
-        if (callee && callee !== owner.name && !/^(console|require|import|super|this)$/.test(callee)) {
-          const key = `${owner.id}::${callee}`;
-          if (!callsSeen.has(key)) {
-            callsSeen.add(key);
-            // Target is a callee *name* (not a node ID).
-            // batchUpsertCallEdges in neo4j-database.ts resolves it by name.
-            edges.push({
-              source: owner.id, target: callee, type: 'CALLS',
-              confidence: 0.6, resolution: 'ast', sourceLine: node.startPosition.row + 1,
-            });
-          }
-        }
-      }
-    }
-
-    if (node.type === 'import_statement') {
-      const src = node.childForFieldName('source');
-      if (src) {
-        edges.push({
-          source: fileNode.id,
-          target: src.text.replace(/['"]/g, ''),
-          type: 'IMPORTS',
-        });
-      }
-    }
-
-    for (const child of node.namedChildren) visit(child, parentId);
-  }
-
-  visit(tree.rootNode, fileNode.id);
-  return { nodes, edges };
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Tree-sitter parser  (Java)
-// ═══════════════════════════════════════════════════════════════════════════════
 
 const JAVA_KIND_MAP: Record<string, NodeType> = {
   class_declaration:       'CLASS',
@@ -252,6 +93,13 @@ const JAVA_KIND_MAP: Record<string, NodeType> = {
 function javaQualifiedName(packageName: string, owners: CodeNode[], name: string): string {
   const segments = [...owners.map(owner => owner.name), name].filter(Boolean);
   return [packageName, ...segments].filter(Boolean).join('.');
+}
+
+// Extract a configuration constant name from a getConfigurationItem argument node.
+function extractConstName(arg: SyntaxNode): string | null {
+  if (arg.type === 'member_access') return arg.text;
+  if (arg.type === 'identifier' && /^[A-Z][A-Z0-9_]+$/.test(arg.text)) return arg.text;
+  return null;
 }
 
 function parseJava(relPath: string, source: string): ParseResult {
@@ -292,6 +140,20 @@ function parseJava(relPath: string, source: string): ParseResult {
     return codeNode;
   }
 
+  // Emit READS_CONFIG edges for each constant argument of a config-reader call.
+  function addConfigEdges(callNode: SyntaxNode, ownerId: string, sourceLine: number): void {
+    const args = callNode.childForFieldName('arguments');
+    if (!args) return;
+    for (const arg of args.namedChildren) {
+      const constName = extractConstName(arg);
+      if (!constName) continue;
+      const constKey = `${ownerId}::config::${constName}`;
+      if (callsSeen.has(constKey)) continue;
+      callsSeen.add(constKey);
+      edges.push({ source: ownerId, target: constName, type: 'READS_CONFIG', confidence: 0.9, resolution: 'ast', sourceLine });
+    }
+  }
+
   function addJavaCall(node: SyntaxNode): void {
     const owner = ownerStack.at(-1);
     const callee = node.childForFieldName('name')?.text;
@@ -304,6 +166,10 @@ function parseJava(relPath: string, source: string): ParseResult {
       source: owner.id, target: callee, type: 'CALLS', confidence: 0.6,
       resolution: 'ast', sourceLine: node.startPosition.row + 1,
     });
+
+    if (/^getConfiguration(Item)?$|^getConfigItem$/.test(callee)) {
+      addConfigEdges(node, owner.id, node.startPosition.row + 1);
+    }
   }
 
   function visit(node: SyntaxNode, parentId: string): void {
@@ -329,8 +195,22 @@ function parseJava(relPath: string, source: string): ParseResult {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Regex fallback parser  (Python, Java, Go, Rust, C#, Ruby, PHP, …)
+// Public entry point — Java only
 // ═══════════════════════════════════════════════════════════════════════════════
+
+export function parseFile(absPath: string, repoRoot: string): ParseResult {
+  if (path.extname(absPath).toLowerCase() !== '.java') return { nodes: [], edges: [] };
+
+  let source: string;
+  try {
+    source = fs.readFileSync(absPath, 'utf8');
+  } catch {
+    return { nodes: [], edges: [] };
+  }
+
+  const relPath = path.relative(repoRoot, absPath).replaceAll('\\', '/');
+  return parseJava(relPath, source);
+}
 
 interface LangPattern {
   class?:    RegExp;

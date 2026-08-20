@@ -5,7 +5,6 @@ import { scanRepository } from './scanner.js';
 import { parseFile } from './parser.js';
 import { Neo4jDb } from './neo4j-database.js';
 import { embedTexts, nodeToText, DEFAULT_CACHE_DIR } from './embedder.js';
-import { analyzeRuntimeRisks } from './risk-analyzer.js';
 import type { IndexOptions, IndexResult, CodeNode, CodeEdge } from './types.js';
 
 /**
@@ -115,8 +114,6 @@ export class Indexer {
     }
 
     await this.db.batchUpsertNodes(allNodes);
-    const findings = analyzeRuntimeRisks(allNodes);
-    await this.db.batchUpsertStaticFindings(findings, repoName);
 
     // Separate CALLS edges — they reference callee *names*, not node IDs,
     // and require name-based resolution after all nodes are in the graph.
