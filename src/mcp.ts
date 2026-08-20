@@ -23,6 +23,11 @@ import { Retriever } from './retriever.js';
 import { Analyzer } from './analyzer.js';
 import { Neo4jDb } from './neo4j-database.js';
 import { cloneOrPull, saveMeta } from './github.js';
+import { countTokens } from '@anthropic-ai/tokenizer';
+
+function logTokens(tool: string, input: string, output: string): void {
+  process.stderr.write(`[tokens] ${tool} in:${countTokens(input)} out:${countTokens(output)}\n`);
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
@@ -186,10 +191,12 @@ server.tool(
       return `${fp}\n${methods}`;
     }).join('\n\n');
 
+    const responseText = `Repo: ${repoLabel} | ${chunks.length} results\n\n${blocks}`;
+    logTokens('query_codebase', question + (symbol ?? '') + (repo ?? ''), responseText);
     return {
       content: [{
         type: 'text',
-        text: `Repo: ${repoLabel} | ${chunks.length} results\n\n${blocks}`,
+        text: responseText,
       }],
     };
   },
@@ -232,10 +239,12 @@ server.tool(
       'Source:',
     ].filter(Boolean).join('\n');
 
+    const responseBody = `${header}\n${source || node.firstLine || '(source unavailable)'}`;
+    logTokens('get_node_context', `${file}:${line}`, responseBody);
     return {
       content: [{
         type: 'text' as const,
-        text: `${header}\n${source || node.firstLine || '(source unavailable)'}`,
+        text: responseBody,
       }],
     };
   },
