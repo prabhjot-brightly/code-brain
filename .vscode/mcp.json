@@ -1,0 +1,47 @@
+{
+    "servers": {
+        "repo-knowledge-graph": {
+            "command": "npx",
+            "args": ["tsx", "src/mcp.ts"],
+            "cwd": "${workspaceFolder}"
+        },
+        "atlassian-mcp-server": {
+            "command": "mcp-atlassian",
+            "args": [],
+            "env": {
+                "ATLASSIAN_BASE_URL": "https://brightlysoftware.atlassian.net",
+                "ATLASSIAN_EMAIL": "prabhjot.singh@si-eam.com",
+                "ATLASSIAN_API_TOKEN": "ATATT3xFfGF0gdqIgFA2pQ005hOaWaEKf0gLJ2jyMGjqAvjWfCXQsbumjvI2hOUBCFPWIBYxkhJP7ZkYuKMGwFA0PofnPi4d1q7vfSaXVpNXMRJYbUehR0pL5-euVT-wJyEeI6q-pfx4rxzBjkQe5OPby_fxrVMbg_5hrTYsSE-dr2HdLIP3U2E=E2A9C0F7"
+            }
+        },
+        "figma": {
+            "url": "https://mcp.figma.com/mcp",
+            "type": "http"
+        },
+        "context7": {
+            "command": "npx",
+            "args": [
+                "-y",
+                "@upstash/context7-mcp@latest"
+            ]
+        },
+        "github": {
+            "command": "npx",
+            "args": [
+                "-y",
+                "@modelcontextprotocol/server-github"
+            ],
+            "env": {
+                "GITHUB_PERSONAL_ACCESS_TOKEN": "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"
+            }
+        }
+    },
+    "inputs": [
+        {
+            "id": "github-pat",
+            "type": "promptString",
+            "description": "GitHub Personal Access Token",
+            "password": true
+        }
+    ]
+}

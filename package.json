@@ -1,0 +1,38 @@
+{
+  "name": "repo-knowledge-graph",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "mcp": "tsx src/mcp.ts",
+    "index": "tsx src/cli.ts index",
+    "github": "tsx src/cli.ts github",
+    "stats": "tsx src/cli.ts stats",
+    "query": "tsx src/cli.ts query",
+    "test": "tsx --test test/parser.test.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.120.0",
+    "@anthropic-ai/tokenizer": "^0.0.4",
+    "@huggingface/transformers": "^3.5.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "better-sqlite3": "^13.0.3",
+    "commander": "^15.0.0",
+    "neo4j-driver": "^6.2.0",
+    "simple-git": "^3.36.0",
+    "tree-sitter": "^0.21.1",
+    "tree-sitter-java": "^0.23.5",
+    "tree-sitter-typescript": "^0.23.2",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^26.2.0",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2"
+  }
+}
