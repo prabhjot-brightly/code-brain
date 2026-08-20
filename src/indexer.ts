@@ -132,7 +132,7 @@ export class Indexer {
       filesScanned: filePaths.length,
       nodesFound:   allNodes.length,
       edgesFound:   allEdges.length,   // includes both structural + CALLS
-      findingsFound: findings.length,
+      findingsFound: 0,
       durationMs:   Date.now() - start,
     };
   }
