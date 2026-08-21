@@ -112,7 +112,24 @@ export function nodeToText(node: CodeNode, firstSourceLine = ''): string {
     .slice(0, 4)
     .join(' ');
 
-  const content = (signature + (constNames ? ` config:${constNames}` : '')).slice(0, 400);
+  // Human-readable string literals (error/log messages) are the richest semantic signal in a method.
+  // e.g. "BC App Connector Flag is disabled" directly matches queries about that flag.
+  const stringLiterals = rawBody.match(/"([^"\\]{8,100})"/g) ?? [];
+  const keyStrings = stringLiterals
+    .map(s => s.slice(1, -1).trim())
+    .filter(s => /[A-Za-z]{3}/.test(s) && !/^https?:\/\/|^\$\{|^[A-Z_]{6,}$/.test(s))
+    .slice(0, 3)
+    .join(' ');
+
+  // Getter property names this method reads — surfaces flag/config names via accessor chains.
+  const getterMatches = rawBody.match(/\.get([A-Z][a-zA-Z]{2,})\(\)/g) ?? [];
+  const getterNames   = getterMatches
+    .map(m => m.replace(/^\.|get|\(\)/g, ''))
+    .slice(0, 4)
+    .join(' ');
+
+  const extras  = [constNames && `config:${constNames}`, keyStrings, getterNames].filter(Boolean).join(' ');
+  const content = (signature + (extras ? ` ${extras}` : '')).slice(0, 512);
 
   return content
     ? `${node.type} ${node.name} in ${location}: ${content}`

@@ -477,9 +477,12 @@ export class Neo4jDb {
            MATCH (tgt:CodeNode {name: e.callee, repoName: $repoName})
            WHERE tgt.type IN ['METHOD', 'FUNCTION']
            WITH src, e, collect(tgt) AS candidates
+           WITH src, e,
+             [c IN candidates WHERE c.filePath = src.filePath] AS sameFile
            WITH src, e, CASE
              WHEN size(candidates) = 1 THEN candidates
-             ELSE [candidate IN candidates WHERE candidate.filePath = src.filePath]
+             WHEN size(sameFile) > 0   THEN sameFile
+             ELSE candidates[0..3]
            END AS resolved
            UNWIND resolved AS tgt
            MERGE (src)-[rel:CALLS]->(tgt)

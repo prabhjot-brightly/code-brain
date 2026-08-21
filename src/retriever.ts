@@ -47,7 +47,16 @@ const RESULT_TYPES = new Set<string>(['METHOD', 'FUNCTION']);
 
 function toFullTextQuery(question: string): string {
   const terms = question.match(/[\p{L}\p{N}]+/gu) ?? [];
-  return [...new Set(terms.filter(term => term.length > 1))].join(' OR ');
+  const unique = [...new Set(terms)];
+  // Prefer longer and capitalised terms (technical names, class names, flag names).
+  // Short words and pure lowercase filler inflate OR matches without adding signal.
+  const ranked = unique
+    .filter(t => t.length >= 4)
+    .sort((a, b) => {
+      const score = (t: string) => (t[0] !== t[0]?.toLowerCase() ? 3 : 0) + t.length;
+      return score(b) - score(a);
+    });
+  return ranked.slice(0, 10).join(' OR ');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -25,8 +25,11 @@ import { Neo4jDb } from './neo4j-database.js';
 import { cloneOrPull, saveMeta } from './github.js';
 import { countTokens } from '@anthropic-ai/tokenizer';
 
-function logTokens(tool: string, input: string, output: string): void {
-  process.stderr.write(`[tokens] ${tool} in:${countTokens(input)} out:${countTokens(output)}\n`);
+function tokenUsage(tool: string, input: string, output: string): string {
+  const inputTokens = countTokens(input);
+  const outputTokens = countTokens(output);
+  process.stderr.write(`[tokens] ${tool} in:${inputTokens} out:${outputTokens}\n`);
+  return `\n\nToken usage (Knowledge Graph MCP): input ${inputTokens}, output ${outputTokens}, total ${inputTokens + outputTokens}.`;
 }
 
 const __filename = fileURLToPath(import.meta.url);
@@ -148,6 +151,7 @@ server.tool(
                 .describe('Filter to a specific repo name (omit to search across all indexed repos)'),
   },
   async ({ question, symbol, filePath, nodeType, depth, limit, repo }) => {
+    const requestText = JSON.stringify({ question, symbol, filePath, nodeType, depth, limit, repo });
     const chunks = await retriever.retrieve({
       question,
       ...(symbol   !== undefined && { symbol }),
@@ -159,10 +163,11 @@ server.tool(
     });
 
     if (chunks.length === 0) {
+      const responseText = 'No relevant code found. Try symbol= with an exact class/method name, or broaden the question.';
       return {
         content: [{
           type: 'text',
-          text: 'No relevant code found. Try symbol= with an exact class/method name, or broaden the question.',
+          text: responseText + tokenUsage('query_codebase', requestText, responseText),
         }],
       };
     }
@@ -192,11 +197,10 @@ server.tool(
     }).join('\n\n');
 
     const responseText = `Repo: ${repoLabel} | ${chunks.length} results\n\n${blocks}`;
-    logTokens('query_codebase', question + (symbol ?? '') + (repo ?? ''), responseText);
     return {
       content: [{
         type: 'text',
-        text: responseText,
+        text: responseText + tokenUsage('query_codebase', requestText, responseText),
       }],
     };
   },
@@ -215,13 +219,15 @@ server.tool(
       .describe('Maximum stored source lines to return (default 60, maximum 100)'),
   },
   async ({ file, line, repo, maxLines }) => {
+    const requestText = JSON.stringify({ file, line, repo, maxLines });
     const candidates = await neo4jDb.getNodeAtLine(line, file, repo);
     const node = candidates[0];
     if (!node) {
+      const responseText = 'No method or function was resolved at that file and line.';
       return {
         content: [{
           type: 'text' as const,
-          text: 'No method or function was resolved at that file and line.',
+          text: responseText + tokenUsage('get_node_context', requestText, responseText),
         }],
       };
     }
@@ -240,11 +246,10 @@ server.tool(
     ].filter(Boolean).join('\n');
 
     const responseBody = `${header}\n${source || node.firstLine || '(source unavailable)'}`;
-    logTokens('get_node_context', `${file}:${line}`, responseBody);
     return {
       content: [{
         type: 'text' as const,
-        text: responseBody,
+        text: responseBody + tokenUsage('get_node_context', requestText, responseBody),
       }],
     };
   },
@@ -273,6 +278,7 @@ server.tool(
     repo:         z.string().optional().describe('Limit diagnosis to a specific indexed repo (omit to search all repos)'),
   },
   async ({ question, stackTrace, errorMessage, runtimeEvidence, file, line, repo }) => {
+    const requestText = JSON.stringify({ question, stackTrace, errorMessage, runtimeEvidence, file, line, repo });
 
     // ── 1. Assemble context from the graph ──────────────────────────────────
     let context;
@@ -391,10 +397,11 @@ server.tool(
       aiSection = `\n── AI diagnosis unavailable ──\n${hint}`;
     }
 
+    const responseText = graphSummary + aiSection;
     return {
       content: [{
         type: 'text' as const,
-        text: graphSummary + aiSection,
+        text: responseText + tokenUsage('diagnose_issue', requestText, responseText),
       }],
     };
   },
