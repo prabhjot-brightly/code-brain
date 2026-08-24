@@ -1,0 +1,31 @@
+services:
+  neo4j:
+    build:
+      context: .
+      args:
+        NEO4J_VERSION: "5.26.0"
+    image: repo-knowledge-graph-neo4j:5.26.0
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-neo4j}
+      NEO4J_initial_dbms_default__database: codebrain
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - neo4j_import:/import
+      - neo4j_plugins:/plugins
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -a bolt://localhost:7687 -u neo4j -p \"$${NEO4J_AUTH#neo4j/}\" 'RETURN 1' >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  neo4j_data:
+  neo4j_logs:
+  neo4j_import:
+  neo4j_plugins:
