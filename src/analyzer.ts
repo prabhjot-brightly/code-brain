@@ -88,6 +88,48 @@ const DIAGNOSIS_TOOL: Anthropic.Tool = {
   },
 };
 
+// ── Result types ───────────────────────────────────────────────────────────────
+
+export interface AnalyzeUsage {
+  inputTokens:         number;
+  outputTokens:        number;
+  cacheReadTokens:     number;
+  cacheCreationTokens: number;
+  estimatedCostUsd:    number;
+}
+
+export interface AnalyzeResult {
+  diagnosis: DiagnosisResult;
+  usage:     AnalyzeUsage;
+}
+
+// ── Model pricing (USD per 1M tokens) ─────────────────────────────────────────
+
+const MODEL_RATES: Record<string, { input: number; output: number; cacheRead: number; cacheWrite: number }> = {
+  'claude-haiku-4-5':          { input: 0.80,  output: 4.00,  cacheRead: 0.08,  cacheWrite: 1.00  },
+  'claude-haiku-4-5-20251001': { input: 0.80,  output: 4.00,  cacheRead: 0.08,  cacheWrite: 1.00  },
+  'claude-sonnet-4-6':         { input: 3.00,  output: 15.00, cacheRead: 0.30,  cacheWrite: 3.75  },
+  'claude-opus-4-7':           { input: 15.00, output: 75.00, cacheRead: 1.50,  cacheWrite: 18.75 },
+};
+
+function estimateCost(model: string, input: number, output: number, cacheRead: number, cacheWrite: number): number {
+  const r = MODEL_RATES[model];
+  if (!r) return 0;
+  const M = 1_000_000;
+  return (input * r.input + output * r.output + cacheRead * r.cacheRead + cacheWrite * r.cacheWrite) / M;
+}
+
+// ── Static system prompt (cached across calls) ────────────────────────────────
+
+const SYSTEM_PROMPT =
+  'You are a senior software engineer performing root-cause analysis on a production incident. ' +
+  'Use only the graph-resolved epicentre, call chain, deterministic findings, and linked incident evidence provided. ' +
+  'Cite their identifiers in the rootCause and fix. ' +
+  'Treat runtimeEvidence as corroborating context, not proof of an unrepresented code path. ' +
+  'If the evidence does not establish a cause, state "insufficient evidence" and do not invent a fix. ' +
+  'Call report_diagnosis with: location (file/line/function of root cause), rootCause (why it fails), ' +
+  'fix (specific code change), confidence, affectedCallers, suggestedTest.';
+
 // ── Token budget constants ─────────────────────────────────────────────────────
 
 /** Lines of epicentre source to include — this is the key evidence. */
@@ -180,8 +222,6 @@ function buildPrompt(ctx: DiagnosisContext): string {
     ctx.relatedTests.slice(0, MAX_TESTS).forEach(n => parts.push(renderSignature(n)));
   }
 
-  parts.push(`\nUse only the graph-resolved epicentre, call chain, deterministic findings, and linked incident evidence above. Cite their identifiers in the rootCause and fix. Treat runtime evidence as corroborating context, not proof of an unrepresented code path. If the evidence does not establish a cause, state "insufficient evidence" and do not invent a fix. Call report_diagnosis with: location (file/line/function of the root cause), rootCause (why it fails), fix (specific code change), confidence, affectedCallers, suggestedTest.`);
-
   return parts.join('\n');
 }
 
@@ -202,20 +242,22 @@ export class Analyzer {
    * Run root-cause analysis on a DiagnosisContext assembled by the Retriever.
    * Forces structured output via tool_use so the result is always parseable.
    *
-   * Throws if the Anthropic API is unavailable or the API key is missing.
+   * The static system prompt and tool schema are marked cache_control:ephemeral
+   * so repeated calls within 5 minutes pay only the cache-read rate (~10× cheaper).
    *
-   * Typical token usage:
-   *   Input:  ~600–900 tokens  (prompt + tool schema)
-   *   Output: ~250–350 tokens  (structured JSON from tool call)
-   *   Cost:   ~$0.0001 per diagnosis at Haiku 4.5 rates
+   * Returns the diagnosis alongside actual Anthropic API token counts and cost.
    */
-  async analyze(ctx: DiagnosisContext): Promise<DiagnosisResult> {
+  async analyze(ctx: DiagnosisContext): Promise<AnalyzeResult> {
     const response = await this.client.messages.create({
       model:      this.model,
-      // 1024 is enough for the structured JSON output (~300 tokens actual).
-      // Increase to 2048 only if you observe truncated responses.
-      max_tokens:  1024,
-      tools:       [DIAGNOSIS_TOOL],
+      max_tokens: 1024,
+      system: [
+        { type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
+      ],
+      tools: [
+        // cache_control on the last tool caches the entire tools array
+        { ...DIAGNOSIS_TOOL, cache_control: { type: 'ephemeral' } } as Anthropic.Tool,
+      ],
       tool_choice: { type: 'tool', name: 'report_diagnosis' },
       messages:    [{ role: 'user', content: buildPrompt(ctx) }],
     });
@@ -228,7 +270,7 @@ export class Analyzer {
     }
 
     const inp = toolBlock.input as Record<string, unknown>;
-    return {
+    const diagnosis: DiagnosisResult = {
       location:        inp['location']        as DiagnosisResult['location'],
       rootCause:       inp['rootCause']        as string,
       fix:             inp['fix']              as string,
@@ -236,5 +278,22 @@ export class Analyzer {
       affectedCallers: (inp['affectedCallers'] as string[]) ?? [],
       suggestedTest:   inp['suggestedTest']    as string,
     };
+
+    const u = response.usage;
+    const cacheRead  = u.cache_read_input_tokens    ?? 0;
+    const cacheWrite = u.cache_creation_input_tokens ?? 0;
+    const usage: AnalyzeUsage = {
+      inputTokens:         u.input_tokens,
+      outputTokens:        u.output_tokens,
+      cacheReadTokens:     cacheRead,
+      cacheCreationTokens: cacheWrite,
+      estimatedCostUsd:    estimateCost(this.model, u.input_tokens, u.output_tokens, cacheRead, cacheWrite),
+    };
+
+    process.stderr.write(
+      `[analyzer] in:${u.input_tokens} cache_read:${cacheRead} cache_write:${cacheWrite} out:${u.output_tokens} cost:$${usage.estimatedCostUsd.toFixed(6)}\n`,
+    );
+
+    return { diagnosis, usage };
   }
 }

@@ -477,7 +477,7 @@ export class Neo4jDb {
            MATCH (tgt:CodeNode {name: e.callee, repoName: $repoName})
            WHERE tgt.type IN ['METHOD', 'FUNCTION']
            WITH src, e, collect(tgt) AS candidates
-           WITH src, e,
+           WITH src, e, candidates,
              [c IN candidates WHERE c.filePath = src.filePath] AS sameFile
            WITH src, e, CASE
              WHEN size(candidates) = 1 THEN candidates
@@ -816,6 +816,40 @@ export class Neo4jDb {
         { nodeId },
       );
       return res.records.map(r => toCodeNode(r.get('node') as Record<string, unknown>));
+    } finally {
+      await s.close();
+    }
+  }
+
+  /**
+   * Return caller and callee counts for a batch of node IDs in one round-trip.
+   * Used by query_codebase to annotate results without extra tool calls.
+   */
+  async getCallCounts(nodeIds: string[]): Promise<Map<string, { callerCount: number; calleeCount: number }>> {
+    if (nodeIds.length === 0) return new Map();
+    const s = this.session();
+    try {
+      const res = await s.run(
+        `UNWIND $nodeIds AS nid
+         MATCH (n:CodeNode {id: nid})
+         OPTIONAL MATCH (caller:CodeNode)-[:CALLS]->(n)
+         OPTIONAL MATCH (n)-[:CALLS]->(callee:CodeNode)
+         RETURN nid,
+                count(DISTINCT caller) AS callerCount,
+                count(DISTINCT callee) AS calleeCount`,
+        { nodeIds },
+      );
+      const out = new Map<string, { callerCount: number; calleeCount: number }>();
+      for (const rec of res.records) {
+        const id  = rec.get('nid') as string;
+        const cc  = rec.get('callerCount');
+        const ec  = rec.get('calleeCount');
+        out.set(id, {
+          callerCount: typeof cc === 'object' ? (cc as { low: number }).low : Number(cc),
+          calleeCount: typeof ec === 'object' ? (ec as { low: number }).low : Number(ec),
+        });
+      }
+      return out;
     } finally {
       await s.close();
     }

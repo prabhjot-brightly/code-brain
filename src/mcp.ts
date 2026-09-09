@@ -138,6 +138,7 @@ server.tool(
     '3. Keep limit ≤ 4 (default). Only raise it if you got 0 useful results at limit=4.',
     '4. Keep depth = 1 (default). Only use depth=2 when you are deliberately tracing a specific call chain from a known symbol — it doubles the Neo4j work and the tokens returned.',
     '5. Do not repeat the same concept with different keywords — one well-targeted call beats three broad ones.',
+    '6. After getting results, if you need full source for 2+ nodes use get_nodes_context([{file,line},...]) — one call instead of N sequential get_node_context calls.',
   ].join('\n'),
   {
     question: z.string().describe('The question or topic to find relevant code for. Ignored when symbol= is set — prefer symbol= for known class/method names.'),
@@ -172,6 +173,9 @@ server.tool(
       };
     }
 
+    // ── Fetch caller/callee counts in one round-trip ──────────────────────────
+    const callCounts = await neo4jDb.getCallCounts(chunks.map(c => c.node.id));
+
     // ── Compact grouped-by-file format ────────────────────────────────────────
     // Groups multiple results from the same file under one path header.
     // Shows the repo name when results span multiple repos.
@@ -189,9 +193,13 @@ server.tool(
 
     const blocks = [...byFile.entries()].map(([fp, fileChunks]) => {
       const methods = fileChunks.map((c) => {
-        const loc = `L${c.node.startLine}`;
-        const sig = c.sourceLines[0]?.trim() ?? c.node.firstLine ?? c.node.name;
-        return `  [${c.node.type} ${loc}] ${sig}`;
+        const loc    = `L${c.node.startLine}`;
+        const sig    = c.sourceLines[0]?.trim() ?? c.node.firstLine ?? c.node.name;
+        const counts = callCounts.get(c.node.id);
+        const graph  = counts
+          ? ` ← ${counts.callerCount} caller${counts.callerCount !== 1 ? 's' : ''} · ${counts.calleeCount} callee${counts.calleeCount !== 1 ? 's' : ''}`
+          : '';
+        return `  [${c.node.type} ${loc}] ${sig}${graph}`;
       }).join('\n');
       return `${fp}\n${methods}`;
     }).join('\n\n');
@@ -210,13 +218,13 @@ server.tool(
 
 server.tool(
   'get_node_context',
-  'Retrieve the bounded source body and documentation for the method or function at an exact file and line. Use after query_codebase identifies a candidate; do not use for broad discovery.',
+  'Retrieve the bounded source body and documentation for the method or function at an exact file and line. Use after query_codebase identifies a candidate; do not use for broad discovery. If you need more than one node, use get_nodes_context instead — one call beats N sequential calls.',
   {
     file: z.string().describe('Exact or partial indexed file path'),
     line: z.number().int().positive().describe('A line contained by the method or function'),
     repo: z.string().optional().describe('Indexed repository to search'),
-    maxLines: z.number().int().min(1).max(100).optional().default(60)
-      .describe('Maximum stored source lines to return (default 60, maximum 100)'),
+    maxLines: z.number().int().min(1).max(100).optional().default(20)
+      .describe('Maximum stored source lines to return (default 20, maximum 100). Pass a higher value only when you need the full method body.'),
   },
   async ({ file, line, repo, maxLines }) => {
     const requestText = JSON.stringify({ file, line, repo, maxLines });
@@ -250,6 +258,58 @@ server.tool(
       content: [{
         type: 'text' as const,
         text: responseBody + tokenUsage('get_node_context', requestText, responseBody),
+      }],
+    };
+  },
+);
+
+// ─── Tool: get_nodes_context ──────────────────────────────────────────────────
+
+server.tool(
+  'get_nodes_context',
+  [
+    'Retrieve source and documentation for MULTIPLE methods/functions in one call.',
+    'Use this instead of calling get_node_context repeatedly — one round-trip instead of N, significantly reducing input token overhead.',
+    'Each node is identified by {file, line}. Pass all nodes you need at once.',
+  ].join('\n'),
+  {
+    nodes: z.array(
+      z.object({
+        file: z.string().describe('Exact or partial indexed file path'),
+        line: z.number().int().positive().describe('A line contained by the method or function'),
+        repo: z.string().optional().describe('Indexed repository to search'),
+      }),
+    ).min(1).max(10).describe('List of nodes to fetch (max 10)'),
+    maxLines: z.number().int().min(1).max(100).optional().default(20)
+      .describe('Maximum source lines per node (default 20). Pass higher only when you need full method bodies.'),
+  },
+  async ({ nodes, maxLines }) => {
+    const requestText = JSON.stringify({ nodes, maxLines });
+
+    const results = await Promise.all(
+      nodes.map(async ({ file, line, repo }) => {
+        const candidates = await neo4jDb.getNodeAtLine(line, file, repo);
+        const node = candidates[0];
+        if (!node) return `${file}:${line} — not found`;
+
+        const source = (node.sourceCode ?? '')
+          .split('\n')
+          .slice(0, maxLines)
+          .join('\n');
+        const identity = node.qualifiedName ?? node.name;
+        return [
+          `── ${node.type} ${identity}  (${node.filePath}:${node.startLine}-${node.endLine})`,
+          node.documentation ? `Doc: ${node.documentation}` : '',
+          source || node.firstLine || '(source unavailable)',
+        ].filter(Boolean).join('\n');
+      }),
+    );
+
+    const responseBody = results.join('\n\n');
+    return {
+      content: [{
+        type: 'text' as const,
+        text: responseBody + tokenUsage('get_nodes_context', requestText, responseBody),
       }],
     };
   },
@@ -366,28 +426,39 @@ server.tool(
         'Provide a stack trace or failing file and line to resolve code evidence. Include trace, route, dependency, deployment, or resource observations as runtimeEvidence when available.',
       ].join('\n');
     } else try {
-      const result = await analyzer.analyze(context);
+      const { diagnosis, usage } = await analyzer.analyze(context);
 
-      const confidenceEmoji = result.confidence === 'high'   ? '🟢'
-                            : result.confidence === 'medium' ? '🟡'
+      const confidenceEmoji = diagnosis.confidence === 'high'   ? '🟢'
+                            : diagnosis.confidence === 'medium' ? '🟡'
                             : '🔴';
+
+      const cacheInfo = usage.cacheReadTokens > 0
+        ? ` (${usage.cacheReadTokens} cached)`
+        : usage.cacheCreationTokens > 0
+          ? ` (${usage.cacheCreationTokens} written to cache)`
+          : '';
+      const costInfo = usage.estimatedCostUsd > 0
+        ? `  cost: $${usage.estimatedCostUsd.toFixed(6)}`
+        : '';
 
       aiSection = [
         '',
         '─'.repeat(60),
-        `${confidenceEmoji} AI Diagnosis  (confidence: ${result.confidence})`,
+        `${confidenceEmoji} AI Diagnosis  (confidence: ${diagnosis.confidence})`,
         '',
-        `📍 Location: ${result.location.file}  :  line ${result.location.line}  —  \`${result.location.function}\``,
+        `📍 Location: ${diagnosis.location.file}  :  line ${diagnosis.location.line}  —  \`${diagnosis.location.function}\``,
         '',
-        `⚠  Root cause:\n${result.rootCause}`,
+        `⚠  Root cause:\n${diagnosis.rootCause}`,
         '',
-        `✅ Fix:\n${result.fix}`,
+        `✅ Fix:\n${diagnosis.fix}`,
         '',
-        result.affectedCallers.length > 0
-          ? `🔗 Also check: ${result.affectedCallers.join(', ')}`
+        diagnosis.affectedCallers.length > 0
+          ? `🔗 Also check: ${diagnosis.affectedCallers.join(', ')}`
           : '',
         '',
-        `🧪 Suggested test: ${result.suggestedTest}`,
+        `🧪 Suggested test: ${diagnosis.suggestedTest}`,
+        '',
+        `── Analyzer API: in:${usage.inputTokens}${cacheInfo} out:${usage.outputTokens}${costInfo} ──`,
       ].filter(l => l !== '').join('\n');
 
     } catch (err) {

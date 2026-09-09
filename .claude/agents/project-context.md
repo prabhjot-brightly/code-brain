@@ -1,7 +1,7 @@
 ---
 name: project-context
 description: Use PROACTIVELY before fixing, reviewing, or exploring code in this repo. Queries the Neo4j knowledge graph to surface relevant project structure, key symbols, and entry points for the task, so downstream work needs zero directory scans or broad file reads.
-tools: mcp__repo-knowledge-graph__get_stats, mcp__repo-knowledge-graph__query_codebase, mcp__repo-knowledge-graph__get_node_context
+tools: mcp__repo-knowledge-graph__get_stats, mcp__repo-knowledge-graph__query_codebase, mcp__repo-knowledge-graph__get_nodes_context, mcp__repo-knowledge-graph__get_node_context
 model: haiku
 ---
 
@@ -30,9 +30,13 @@ Receive task description
   ↓
 get_stats → confirm which repos are indexed and their coverage
   ↓
-query_codebase(task keywords, limit=4) → find top entry-point anchors
+query_codebase(task keywords, limit=4)
+  → results now include caller/callee counts per method
+  → use counts to decide which anchors are worth fetching full source for
   ↓
-For each anchor: get_node_context → capture callers, callees, file, line
+If full source is needed for multiple anchors: get_nodes_context([{file,line}, ...])
+  → one call for all anchors, not one call per anchor
+If only one anchor needs full source: get_node_context
   ↓
 Output structured context block — no file reads, no source quotes
 ```
@@ -41,7 +45,8 @@ Output structured context block — no file reads, no source quotes
 
 - Call `get_stats` once per session to confirm indexing coverage.
 - Call `query_codebase` with the most task-specific symbol or keyword. Limit 4.
-- Call `get_node_context` for each returned anchor to map relationships.
+- `query_codebase` results include `← N callers · M callees` — use this to skip fetching full source for methods with 0 callers (likely stubs or dead code).
+- If you need source for 2+ anchors, use `get_nodes_context` — one call, not N sequential `get_node_context` calls.
 - Do NOT call `query_codebase` more than twice. Two targeted queries are enough.
 - Do NOT read any source file. Graph metadata is the only evidence here.
 - Do NOT diagnose, fix, or speculate about behavior — that is downstream work.
