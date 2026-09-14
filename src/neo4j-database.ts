@@ -13,7 +13,7 @@
  * A vector index on `embedding` enables fast ANN semantic search.
  *
  * Connection settings come from environment variables (see .env):
- *   NEO4J_URI        default: neo4j://127.0.0.1:7687
+ *   NEO4J_URI        default: bolt://127.0.0.1:7687
  *   NEO4J_USER       default: neo4j
  *   NEO4J_PASSWORD   default: neo4j
  *   NEO4J_DATABASE   default: codebrain
@@ -151,7 +151,7 @@ export class Neo4jDb {
   readonly database: string;
 
   constructor(
-    uri      = process.env['NEO4J_URI']      ?? 'neo4j://127.0.0.1:7687',
+    uri      = process.env['NEO4J_URI']      ?? 'bolt://127.0.0.1:7687',
     user     = process.env['NEO4J_USER']     ?? 'neo4j',
     password = process.env['NEO4J_PASSWORD'] ?? 'neo4j',
     database = process.env['NEO4J_DATABASE'] ?? 'codebrain',
@@ -174,6 +174,15 @@ export class Neo4jDb {
    * Create constraint, property indexes, and the vector index.
    * Idempotent — safe to call on every startup.
    */
+  async dropVectorIndex(): Promise<void> {
+    const s = this.session();
+    try {
+      await s.run(`DROP INDEX ${VECTOR_INDEX} IF EXISTS`);
+    } finally {
+      await s.close();
+    }
+  }
+
   async init(): Promise<void> {
     const s = this.session();
     try {

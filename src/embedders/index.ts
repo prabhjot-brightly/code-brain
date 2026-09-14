@@ -40,7 +40,7 @@ export function getEmbedder(): OpenAIEmbedder | LocalEmbedder {
     const cacheDir = process.env['EMBEDDER_CACHE_DIR']
       ?? path.join(os.homedir(), '.cache', 'repo-knowledge-graph', 'models');
     _instance = new LocalEmbedder(cacheDir);
-    process.stderr.write(`[embedder] backend=local  cache=${cacheDir}\n`);
+    process.stderr.write(`[embedder] backend=local  model=bge-large-en-v1.5  cache=${cacheDir}\n`);
   } else {
     _instance = new OpenAIEmbedder();
     process.stderr.write('[embedder] backend=openai  model=text-embedding-3-small\n');

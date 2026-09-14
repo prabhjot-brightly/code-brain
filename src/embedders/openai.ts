@@ -34,7 +34,6 @@ export class OpenAIEmbedder implements Embedder {
     if (texts.length === 0) return [];
 
     // Lazy import — only pulled in when this backend is active
-    // @ts-expect-error – openai must be installed (npm install)
     const { default: OpenAI } = await import('openai');
     const client = new OpenAI({ apiKey: this.apiKey });
     const results: number[][] = [];

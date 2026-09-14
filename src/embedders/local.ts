@@ -1,14 +1,14 @@
 /**
  * embedders/local.ts
  * ───────────────────
- * Offline backend using Xenova/all-MiniLM-L6-v2 via @huggingface/transformers.
- * 384-dim, general-purpose, no API key required.
+ * Offline backend using Xenova/bge-large-en-v1.5 via @huggingface/transformers.
+ * 1024-dim, high-quality, no API key required (~650 MB download on first run).
  *
  * Use this when EMBEDDER=local in the environment.
  * The HuggingFace pipeline is created lazily on first embed() call so the
  * MCP server starts fast regardless of backend choice.
  *
- * NOTE: switching from local (384-dim) to openai (1536-dim) requires
+ * NOTE: switching from local (1024-dim) to openai (1536-dim) requires
  * dropping and recreating the Neo4j vector index and re-running embed.
  * Set EMBEDDING_DIMS to match your active backend.
  */
@@ -16,7 +16,7 @@
 import process from 'node:process';
 import type { Embedder, InputType } from './base.js';
 
-const MODEL_ID   = 'Xenova/all-MiniLM-L6-v2';
+const MODEL_ID   = 'Xenova/bge-large-en-v1.5';
 const BATCH_SIZE = 32;
 
 type HFPipeline = (
@@ -28,7 +28,7 @@ type HFPipeline = (
 let _pipeline: HFPipeline | null = null;
 
 export class LocalEmbedder implements Embedder {
-  readonly dims = 384;
+  readonly dims = 1024;
 
   constructor(private readonly cacheDir: string) {}
 

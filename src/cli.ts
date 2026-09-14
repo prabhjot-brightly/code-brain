@@ -124,6 +124,24 @@ program
     }
   });
 
+// ─── reset-index ──────────────────────────────────────────────────────────────
+
+program
+  .command('reset-index')
+  .description('Drop and recreate the vector index (needed when switching embedding models)')
+  .action(async () => {
+    const db = new Neo4jDb();
+    try {
+      console.log('Dropping old vector index…');
+      await db.dropVectorIndex();
+      console.log('Recreating vector index with current EMBEDDING_DIMS…');
+      await db.init();
+      console.log(`✓ Done. Now re-run: npx tsx src/cli.ts index <repo-path>`);
+    } finally {
+      await db.close();
+    }
+  });
+
 // ─── run ──────────────────────────────────────────────────────────────────────
 
 program.parseAsync(process.argv).catch((err: unknown) => {
