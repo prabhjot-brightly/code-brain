@@ -51,7 +51,15 @@ import type {
 
 export const VECTOR_INDEX = 'codeNodeEmbeddings';
 export const FULLTEXT_INDEX = 'codeNodeText';
-export const VECTOR_DIMS  = 384;
+/**
+ * Embedding dimension — must match the active backend:
+ *   1536  OpenAI text-embedding-3-small  (default)
+ *   384   local Xenova/all-MiniLM-L6-v2
+ *
+ * Set EMBEDDING_DIMS in .env when switching backends.
+ * Changing this requires dropping the vector index and re-running embed.
+ */
+export const VECTOR_DIMS  = parseInt(process.env['EMBEDDING_DIMS'] ?? '1536', 10);
 
 /** Minimum cosine similarity to qualify as a semantic seed. */
 export const SEMANTIC_THRESHOLD = 0.30;
@@ -394,14 +402,17 @@ export class Neo4jDb {
    * in Cypher (Neo4j does not support dynamic rel types without APOC).
    * Edge types come from our own EdgeType enum — safe to interpolate.
    *
-   * CALLS edges are excluded here — their target is a callee *name*, not a
-   * node ID.  Use batchUpsertCallEdges() to resolve and persist them.
+   * CALLS, EXTENDS, and IMPLEMENTS edges are excluded here — their targets
+   * are names, not node IDs.  Use the dedicated resolution methods:
+   *   batchUpsertCallEdges()        — for CALLS
+   *   batchUpsertInheritanceEdges() — for EXTENDS / IMPLEMENTS
    */
   async batchUpsertEdges(edges: CodeEdge[]): Promise<void> {
     if (edges.length === 0) return;
 
-    // CALLS edges use name-based targets — handled separately
-    const nonCallEdges = edges.filter(e => e.type !== 'CALLS');
+    // Name-based edges are handled by dedicated resolution methods
+    const NAME_BASED = new Set(['CALLS', 'EXTENDS', 'IMPLEMENTS', 'INJECTS']);
+    const nonCallEdges = edges.filter(e => !NAME_BASED.has(e.type));
     if (nonCallEdges.length === 0) return;
 
     // Group by relationship type
@@ -495,6 +506,62 @@ export class Neo4jDb {
     }
   }
 
+  /**
+   * Resolve and upsert EXTENDS / IMPLEMENTS edges by class/interface name.
+   *
+   * The Java parser emits these edges with the target set to the parent class
+   * or interface name (not a node ID).  This method looks up matching CLASS or
+   * INTERFACE nodes by name within the same repo and creates the relationship.
+   *
+   * Ambiguous names (same name in multiple files) are ignored — only unique
+   * matches are connected, keeping the graph trustworthy.
+   */
+  async batchUpsertInheritanceEdges(
+    edges:    CodeEdge[],
+    repoName: string,
+  ): Promise<void> {
+    const inheritEdges = edges.filter(
+      e => e.type === 'EXTENDS' || e.type === 'IMPLEMENTS' || e.type === 'INJECTS',
+    );
+    if (inheritEdges.length === 0) return;
+
+    const s = this.session();
+    try {
+      // Process each type separately so the relationship label is a static string
+      for (const relType of ['EXTENDS', 'IMPLEMENTS', 'INJECTS'] as const) {
+        const batch = inheritEdges
+          .filter(e => e.type === relType)
+          .map(e => ({
+            source: e.source,
+            targetName: e.target,   // target holds class/interface name here
+            properties: {
+              confidence: e.confidence ?? 1.0,
+              resolution: e.resolution ?? 'ast',
+            },
+          }));
+        if (batch.length === 0) continue;
+
+        for (let i = 0; i < batch.length; i += EDGE_CHUNK) {
+          const chunk = batch.slice(i, i + EDGE_CHUNK);
+          await s.run(
+            `UNWIND $chunk AS e
+             MATCH (src:CodeNode {id: e.source})
+             MATCH (tgt:CodeNode {name: e.targetName, repoName: $repoName})
+             WHERE tgt.type IN ['CLASS', 'INTERFACE']
+             WITH src, e, collect(tgt) AS candidates
+             WHERE size(candidates) = 1
+             UNWIND candidates AS tgt
+             MERGE (src)-[rel:${relType}]->(tgt)
+             SET rel += e.properties`,
+            { chunk, repoName },
+          );
+        }
+      }
+    } finally {
+      await s.close();
+    }
+  }
+
   // ── Embeddings ────────────────────────────────────────────────────────────────
 
   /**
@@ -503,7 +570,7 @@ export class Neo4jDb {
    * Float32Array → regular number[] for Neo4j driver compatibility.
    */
   async setEmbeddingsBatch(
-    pairs: Array<{ nodeId: string; vec: Float32Array }>,
+    pairs: Array<{ nodeId: string; vec: number[] }>,
   ): Promise<void> {
     if (pairs.length === 0) return;
     const s = this.session();
@@ -511,7 +578,7 @@ export class Neo4jDb {
       for (let i = 0; i < pairs.length; i += EMB_CHUNK) {
         const batch = pairs.slice(i, i + EMB_CHUNK).map(({ nodeId, vec }) => ({
           id:        nodeId,
-          embedding: Array.from(vec),   // Float32Array → plain JS number[]
+          embedding: vec,
         }));
         await s.run(
           `UNWIND $batch AS data
@@ -532,13 +599,13 @@ export class Neo4jDb {
    * Returns at most `topK` nodes whose cosine similarity to `queryVec` ≥ threshold.
    */
   async vectorSearch(
-    queryVec:  Float32Array,
+    queryVec:  number[],
     threshold: number,
     topK:      number,
     repoName?: string,
   ): Promise<VectorHit[]> {
     const s   = this.session();
-    const vec = Array.from(queryVec);       // must be plain number[]
+    const vec = queryVec;
     try {
       // Neo4j filters after ANN candidate selection. Fetch a bounded larger
       // candidate pool when constrained to one repo so other repos cannot crowd

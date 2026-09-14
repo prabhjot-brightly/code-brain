@@ -17,11 +17,11 @@
   "type": "module",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.120.0",
+    "openai": "^4.0.0",
     "@anthropic-ai/tokenizer": "^0.0.4",
     "@huggingface/transformers": "^3.5.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "better-sqlite3": "^13.0.3",
-    "commander": "^15.0.0",
+"commander": "^15.0.0",
     "neo4j-driver": "^6.2.0",
     "simple-git": "^3.36.0",
     "tree-sitter": "^0.21.1",
@@ -30,8 +30,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^9.6.0",
-    "@types/node": "^26.2.0",
+"@types/node": "^26.2.0",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2"
   }

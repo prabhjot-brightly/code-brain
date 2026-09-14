@@ -4,8 +4,9 @@ import path from 'node:path';
 import { scanRepository } from './scanner.js';
 import { parseFile } from './parser.js';
 import { Neo4jDb } from './neo4j-database.js';
-import { embedTexts, nodeToText, DEFAULT_CACHE_DIR } from './embedder.js';
+import { embedTexts, nodeToText } from './embedder.js';
 import type { IndexOptions, IndexResult, CodeNode, CodeEdge } from './types.js';
+import type { ParseResult } from './parsers/base.js';
 
 /**
  * Maximum lines of source code stored per node in Neo4j.
@@ -60,13 +61,18 @@ export class Indexer {
     const filePaths = scanRepository(opts.repoPath, opts.scan);
     process.stderr.write(`[indexer] scanning ${filePaths.length} files…\n`);
 
-    const allNodes: CodeNode[] = [];
-    const allEdges: CodeEdge[] = [];
+    const allNodes:          CodeNode[] = [];
+    const allEdges:          CodeEdge[] = [];
+    // Second-pass name references — collected across all files, resolved after
+    // all nodes are stored (same two-pass pattern used by codegraph).
+    const allExtendsRefs:    CodeEdge[] = [];
+    const allImplementsRefs: CodeEdge[] = [];
+    const allInjectsRefs:    CodeEdge[] = [];
 
     for (const absPath of filePaths) {
       try {
-        const { nodes, edges } = parseFile(absPath, opts.repoPath);
-        const ids = new Map(nodes.map(node => [node.id, `${repoName}::${node.id}`]));
+        const parsed: ParseResult = parseFile(absPath, opts.repoPath);
+        const ids = new Map(parsed.nodes.map(node => [node.id, `${repoName}::${node.id}`]));
 
         let sourceLines: string[] = [];
         try {
@@ -75,15 +81,15 @@ export class Indexer {
           // unreadable — nodes will have empty sourceCode
         }
 
-        for (const node of nodes) {
+        for (const node of parsed.nodes) {
           let sourceCode = '';
-          let firstLine = '';
+          let firstLine  = '';
 
           if (node.type !== 'FILE' && sourceLines.length > 0) {
             const lineStart = node.startLine - 1;
-            const lineEnd = Math.min(node.endLine, lineStart + SOURCE_CODE_MAX_LINES);
-            sourceCode = sourceLines.slice(lineStart, lineEnd).join('\n');
-            firstLine = (sourceLines[lineStart] ?? '').trim().slice(0, 500);
+            const lineEnd   = Math.min(node.endLine, lineStart + SOURCE_CODE_MAX_LINES);
+            sourceCode      = sourceLines.slice(lineStart, lineEnd).join('\n');
+            firstLine       = (sourceLines[lineStart] ?? '').trim().slice(0, 500);
           } else if (node.type === 'FILE' && sourceLines.length > 0) {
             firstLine = (sourceLines[0] ?? '').trim().slice(0, 500);
             if (isConfigurationFile(absPath)) {
@@ -93,7 +99,7 @@ export class Indexer {
 
           allNodes.push({
             ...node,
-            id: ids.get(node.id)!,
+            id:       ids.get(node.id)!,
             repoName,
             repoPath: opts.repoPath,
             sourceCode,
@@ -101,13 +107,46 @@ export class Indexer {
           });
         }
 
-        for (const edge of edges) {
+        for (const edge of parsed.edges) {
           allEdges.push({
             ...edge,
             source: ids.get(edge.source) ?? edge.source,
-            target: ids.get(edge.target) ?? edge.target,
+            // CALLS edges use a name as target — don't remap through ids
+            target: edge.type === 'CALLS' || edge.type === 'READS_CONFIG'
+              ? edge.target
+              : (ids.get(edge.target) ?? edge.target),
           });
         }
+
+        // Collect second-pass name refs (targets are class/interface names, not IDs)
+        for (const ref of parsed.extendsRefs) {
+          allExtendsRefs.push({
+            source:     `${repoName}::${ref.sourceId}`,
+            target:     ref.targetName,
+            type:       'EXTENDS',
+            confidence: 1.0,
+            resolution: 'ast',
+          });
+        }
+        for (const ref of parsed.implementsRefs) {
+          allImplementsRefs.push({
+            source:     `${repoName}::${ref.sourceId}`,
+            target:     ref.targetName,
+            type:       'IMPLEMENTS',
+            confidence: 1.0,
+            resolution: 'ast',
+          });
+        }
+        for (const ref of parsed.injectsRefs) {
+          allInjectsRefs.push({
+            source:     `${repoName}::${ref.sourceId}`,
+            target:     ref.targetName,
+            type:       'INJECTS',
+            confidence: 1.0,
+            resolution: 'ast',
+          });
+        }
+
       } catch (err) {
         process.stderr.write(`[indexer] skipping ${absPath}: ${String(err)}\n`);
       }
@@ -115,10 +154,10 @@ export class Indexer {
 
     await this.db.batchUpsertNodes(allNodes);
 
-    // Separate CALLS edges — they reference callee *names*, not node IDs,
-    // and require name-based resolution after all nodes are in the graph.
+    // Separate CALLS edges — name-based, resolved after all nodes are stored.
+    // EXTENDS/IMPLEMENTS refs are also name-based and handled separately.
     const callEdges  = allEdges.filter(e => e.type === 'CALLS');
-    const otherEdges = allEdges.filter(e => e.type !== 'CALLS');
+    const otherEdges = allEdges.filter(e => e.type !== 'CALLS' && e.type !== 'EXTENDS' && e.type !== 'IMPLEMENTS');
 
     process.stderr.write(`[indexer] writing ${otherEdges.length} structural edges to Neo4j…\n`);
     await this.db.batchUpsertEdges(otherEdges);
@@ -126,6 +165,14 @@ export class Indexer {
     if (callEdges.length > 0) {
       process.stderr.write(`[indexer] resolving ${callEdges.length} CALLS edges by name…\n`);
       await this.db.batchUpsertCallEdges(callEdges, repoName);
+    }
+
+    const inheritanceEdges = [...allExtendsRefs, ...allImplementsRefs, ...allInjectsRefs];
+    if (inheritanceEdges.length > 0) {
+      process.stderr.write(
+        `[indexer] resolving ${allExtendsRefs.length} EXTENDS + ${allImplementsRefs.length} IMPLEMENTS + ${allInjectsRefs.length} INJECTS edges…\n`,
+      );
+      await this.db.batchUpsertInheritanceEdges(inheritanceEdges, repoName);
     }
 
     return {
@@ -148,9 +195,8 @@ export class Indexer {
    * already stored, no disk access needed for text generation).
    */
   async embedNodes(
-    _repoPath: string,       // kept for API compatibility; source is in Neo4j now
+    _repoPath: string,   // kept for API compatibility; source is in Neo4j now
     repoName:  string,
-    cacheDir:  string = DEFAULT_CACHE_DIR,
   ): Promise<number> {
     // Pull only the node types that carry actual logic
     const [methods, functions, classes, interfaces] = await Promise.all([
@@ -171,7 +217,7 @@ export class Indexer {
     // The `firstLine` stored in Neo4j already has the signature — no disk I/O needed.
     const texts = targets.map(n => nodeToText(n, n.firstLine ?? ''));
 
-    const vecs = await embedTexts(texts, cacheDir);
+    const vecs = await embedTexts(texts, 'document');
 
     await this.db.setEmbeddingsBatch(
       targets.map((n, i) => ({ nodeId: n.id, vec: vecs[i]! })),

@@ -12,9 +12,9 @@
  *   NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, NEO4J_DATABASE
  */
 
+import os from 'node:os';
 import process from 'node:process';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -22,7 +22,7 @@ import { Indexer } from './indexer.js';
 import { Retriever } from './retriever.js';
 import { Analyzer } from './analyzer.js';
 import { Neo4jDb } from './neo4j-database.js';
-import { cloneOrPull, saveMeta } from './github.js';
+import { cloneOrPull } from './github.js';
 import { countTokens } from '@anthropic-ai/tokenizer';
 
 function tokenUsage(tool: string, input: string, output: string): string {
@@ -32,10 +32,10 @@ function tokenUsage(tool: string, input: string, output: string): string {
   return `\n\nToken usage (Knowledge Graph MCP): input ${inputTokens}, output ${outputTokens}, total ${inputTokens + outputTokens}.`;
 }
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname  = path.dirname(__filename);
-const DATA_DIR   = path.join(__dirname, '..', 'data');
-const REPOS_DIR  = path.join(DATA_DIR, 'repos');
+// Cloned repos land here — configurable via REPOS_DIR env var so the package
+// directory stays clean. Defaults to the OS temp dir (mirrors codegraph pattern).
+const REPOS_DIR  = process.env['REPOS_DIR']
+  ?? path.join(os.tmpdir(), 'repo-knowledge-graph', 'repos');
 
 // ── Singletons — one driver, reused across all tool calls ────────────────────
 
@@ -77,13 +77,6 @@ server.tool(
     const result = await indexer.index({ repoPath: absRepo, repoName });
     const count  = await indexer.embedNodes(absRepo, repoName);
 
-    saveMeta(DATA_DIR, {
-      repoPath: absRepo,
-      repoUrl:  '',
-      repoName,
-      indexedAt: Date.now(),
-    });
-
     return {
       content: [{
         type: 'text',
@@ -109,7 +102,6 @@ server.tool(
     const meta   = await cloneOrPull(repo, REPOS_DIR);
     const result = await indexer.index({ repoPath: meta.repoPath, repoName: meta.repoName });
     const count  = await indexer.embedNodes(meta.repoPath, meta.repoName);
-    saveMeta(DATA_DIR, meta);
 
     return {
       content: [{

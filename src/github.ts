@@ -52,21 +52,3 @@ export async function cloneOrPull(
   return { repoPath, repoUrl: url, repoName: name, indexedAt: Date.now() };
 }
 
-// ─── Persist last-indexed repo so `query` can find it ────────────────────────
-
-export function saveMeta(dataDir: string, meta: RepoMeta): void {
-  fs.writeFileSync(
-    path.join(dataDir, 'meta.json'),
-    JSON.stringify(meta, null, 2),
-  );
-}
-
-export function loadMeta(dataDir: string): RepoMeta | null {
-  const metaPath = path.join(dataDir, 'meta.json');
-  if (!fs.existsSync(metaPath)) return null;
-  try {
-    return JSON.parse(fs.readFileSync(metaPath, 'utf8')) as RepoMeta;
-  } catch {
-    return null;
-  }
-}

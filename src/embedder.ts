@@ -1,98 +1,51 @@
-import process from 'node:process';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+/**
+ * embedder.ts
+ * ────────────
+ * Public embedding API used by indexer and retriever.
+ *
+ * The actual model/backend lives in src/embedders/ — controlled by the
+ * EMBEDDER env var (see src/embedders/index.ts).  This file owns:
+ *
+ *   embedTexts()  — thin wrapper around the active Embedder singleton
+ *   nodeToText()  — text representation of a CodeNode for embedding;
+ *                   model-agnostic, so it stays here rather than in each backend
+ */
+
+import { getEmbedder } from './embedders/index.js';
+import type { InputType } from './embedders/base.js';
 import type { CodeNode } from './types.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname  = path.dirname(__filename);
+export type { InputType } from './embedders/base.js';
 
-export const DIMS       = 384;
-const MODEL_ID          = 'Xenova/all-MiniLM-L6-v2';
-const BATCH_SIZE        = 32;
-
-// Lazy singleton — created on first call, reused thereafter
-let _pipeline: (
-  (texts: string[], opts: { pooling: string; normalize: boolean }) => Promise<{ data: Float32Array }>
-) | null = null;
-
-async function getPipeline(cacheDir: string) {
-  if (_pipeline !== null) return _pipeline;
-
-  process.stderr.write('[embedder] loading model (first run downloads ~22 MB)…\n');
-
-  // Dynamic import keeps startup fast when embeddings are not needed
-  const { pipeline, env } = await import('@huggingface/transformers');
-  env.cacheDir = cacheDir;
-
-  // @ts-expect-error – generic pipeline return type
-  _pipeline = await pipeline('feature-extraction', MODEL_ID, { dtype: 'fp32' });
-
-  process.stderr.write('[embedder] model ready\n');
-  return _pipeline!;
-}
+// ── embedTexts ───────────────────────────────────────────────────────────────
 
 /**
- * Embed an array of texts in batches.
- * Returns one Float32Array of DIMS floats per input text.
- * Vectors are L2-normalised (unit length) — dot product = cosine similarity.
+ * Embed an array of texts using the active backend.
+ * Returns one number[] per input text (dims depend on backend:
+ * 1536 for OpenAI text-embedding-3-small, 384 for local Xenova).
+ *
+ * @param inputType — 'document' when indexing, 'query' when searching.
+ *   Asymmetric models use different encoders for each; symmetric models
+ *   (local) ignore this field.
  */
 export async function embedTexts(
-  texts:    string[],
-  cacheDir: string,
-): Promise<Float32Array[]> {
-  if (texts.length === 0) return [];
-
-  const pipe    = await getPipeline(cacheDir);
-  const results: Float32Array[] = [];
-
-  for (let i = 0; i < texts.length; i += BATCH_SIZE) {
-    const batch = texts.slice(i, i + BATCH_SIZE);
-    const out   = await pipe(batch, { pooling: 'mean', normalize: true });
-
-    // out.data is a flat Float32Array: [vec0_dim0…vec0_dimN, vec1_dim0…]
-    const flat = out.data;
-    for (let j = 0; j < batch.length; j++) {
-      // .slice() copies the subarray — safe to store independently
-      results.push(flat.slice(j * DIMS, (j + 1) * DIMS));
-    }
-
-    if (texts.length > BATCH_SIZE) {
-      const done = Math.min(i + BATCH_SIZE, texts.length);
-      process.stderr.write(`[embedder] ${done}/${texts.length} nodes embedded\n`);
-    }
-  }
-
-  return results;
+  texts:     string[],
+  inputType: InputType = 'document',
+): Promise<number[][]> {
+  return getEmbedder().embed(texts, inputType);
 }
 
-/**
- * Cosine similarity between two pre-normalised vectors.
- * Equivalent to dot product when vectors have unit length.
- */
-export function similarity(a: Float32Array, b: Float32Array): number {
-  let s = 0;
-  for (let i = 0; i < DIMS; i++) s += (a[i] ?? 0) * (b[i] ?? 0);
-  return s;
-}
+// ── nodeToText ───────────────────────────────────────────────────────────────
 
 /**
  * Build the text string that represents a code node for embedding.
  *
- * Previously only the signature line was used, which misses all semantic
- * signal in the method body (variable names, called methods, constants,
- * auth types, cache keys, etc.).  Now we use:
+ * Packs: node type + name + file location (last two path segments) +
+ * signature line + config constant names + key string literals + getter
+ * names. Capped at 512 chars.
  *
- *   1. File-path context  — last two path segments give class + package,
- *      e.g. "proxy/BusinessCentralProxy" anchors the node spatially.
- *   2. Body prefix        — first 8 non-blank lines of sourceCode (stored
- *      in Neo4j at index time, no disk I/O here).  This surfaces tokens
- *      like "vaultSecretService", "OAUTH_2", "cacheManager.put",
- *      "bearerToken" that keyword/semantic queries actually look for.
- *   3. Signature fallback — if sourceCode is absent, fall back to the
- *      passed firstSourceLine so existing call-sites still work.
- *
- * Total input is capped at 400 chars — well inside MiniLM-L6's 256-token
- * window (~400 word-pieces) so nothing is silently truncated by the model.
+ * Source code hints are extracted from the `sourceCode` property already
+ * stored in Neo4j — no disk I/O required at embed time.
  */
 export function nodeToText(node: CodeNode, firstSourceLine = ''): string {
   const parts     = node.filePath.replace(/\\/g, '/').split('/');
@@ -100,7 +53,6 @@ export function nodeToText(node: CodeNode, firstSourceLine = ''): string {
   const pkg       = parts.at(-2) ?? '';
   const location  = pkg ? `${pkg}/${className}` : className;
 
-  // Signature only — no body lines in the embedding; keeps vectors focused.
   const signature = (node.firstLine ?? firstSourceLine ?? node.name).trim();
 
   // Append config constant names so flag-name queries hit the reader directly.
@@ -112,8 +64,7 @@ export function nodeToText(node: CodeNode, firstSourceLine = ''): string {
     .slice(0, 4)
     .join(' ');
 
-  // Human-readable string literals (error/log messages) are the richest semantic signal in a method.
-  // e.g. "BC App Connector Flag is disabled" directly matches queries about that flag.
+  // Human-readable string literals are the richest semantic signal in a method.
   const stringLiterals = rawBody.match(/"([^"\\]{8,100})"/g) ?? [];
   const keyStrings = stringLiterals
     .map(s => s.slice(1, -1).trim())
@@ -121,7 +72,7 @@ export function nodeToText(node: CodeNode, firstSourceLine = ''): string {
     .slice(0, 3)
     .join(' ');
 
-  // Getter property names this method reads — surfaces flag/config names via accessor chains.
+  // Getter property names this method reads.
   const getterMatches = rawBody.match(/\.get([A-Z][a-zA-Z]{2,})\(\)/g) ?? [];
   const getterNames   = getterMatches
     .map(m => m.replace(/^\.|get|\(\)/g, ''))
@@ -135,6 +86,3 @@ export function nodeToText(node: CodeNode, firstSourceLine = ''): string {
     ? `${node.type} ${node.name} in ${location}: ${content}`
     : `${node.type} ${node.name} in ${node.filePath}`;
 }
-
-/** Default cache directory relative to this module's location */
-export const DEFAULT_CACHE_DIR = path.join(__dirname, '..', 'data', 'models');

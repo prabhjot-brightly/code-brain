@@ -7,6 +7,8 @@ export type EdgeType =
   | 'REFERENCES'
   | 'EXTENDS'
   | 'IMPLEMENTS'
+  // class → class/interface it receives via CDI / Spring / Quarkus @Inject
+  | 'INJECTS'
   // method → configuration constant it reads (e.g. AdapterConstants.BC_APP_CONNECTOR_FLAG)
   | 'READS_CONFIG'
   // method → field/property it reads from a model/config object (e.g. appConfig.getEnabled())

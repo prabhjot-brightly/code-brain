@@ -1,5 +1,5 @@
 import { Neo4jDb, SEMANTIC_THRESHOLD } from './neo4j-database.js';
-import { embedTexts, DEFAULT_CACHE_DIR } from './embedder.js';
+import { embedTexts } from './embedder.js';
 import { parseStackTrace, extractLineHints } from './stack-trace-parser.js';
 import type { RetrievalQuery, ContextChunk, CodeNode, DiagnosisContext } from './types.js';
 
@@ -73,8 +73,7 @@ export class Retriever {
    * Source code comes directly from Neo4j node properties — no disk I/O.
    */
   async retrieve(
-    query:    RetrievalQuery,
-    cacheDir: string = DEFAULT_CACHE_DIR,
+    query: RetrievalQuery,
   ): Promise<ContextChunk[]> {
     const {
       question, symbol, filePath, nodeType,
@@ -108,7 +107,7 @@ export class Retriever {
     if (exactSeeds.length === 0 && question) {
       const fullTextQuery = toFullTextQuery(question);
       const [queryVec, lexicalHits] = await Promise.all([
-        embedTexts([question], cacheDir).then(([vec]) => vec),
+        embedTexts([question], 'query').then(([vec]) => vec),
         this.db.fullTextSearch(fullTextQuery, MAX_LEXICAL_SEEDS, repoName),
       ]);
       if (queryVec) {
@@ -218,7 +217,7 @@ export class Retriever {
     file?:         string;
     line?:         number;
     repoName?:     string;
-  }, cacheDir: string = DEFAULT_CACHE_DIR): Promise<DiagnosisContext> {
+  }): Promise<DiagnosisContext> {
     const { question, errorMessage, stackTrace, runtimeEvidence, repoName } = opts;
     let epicentre: CodeNode | undefined;
     let evidenceLevel: 'exact' | 'semantic' | 'none' = 'none';
@@ -258,7 +257,7 @@ export class Retriever {
 
     // Fall back to semantic search on the question
     if (!epicentre && question) {
-      const [queryVec] = await embedTexts([question], cacheDir);
+      const [queryVec] = await embedTexts([question], 'query');
       if (queryVec) {
         const hits = await this.db.vectorSearch(
           queryVec, SEMANTIC_THRESHOLD, 5, repoName,
