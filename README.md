@@ -37,19 +37,35 @@ Browser UI at `http://localhost:7474`, Bolt at `bolt://localhost:7687`.
 
 ### 3. Create `.env`
 
+Copy the block below into a `.env` file at the project root.
+
 ```env
+# ── Neo4j ────────────────────────────────────────────────────────────────────
+# URI must match the port in docker-compose.yml (default 7687)
 NEO4J_URI=bolt://127.0.0.1:7687
+
+# Credentials — must match NEO4J_AUTH in docker-compose.yml (format: user/password)
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=neo4j
+
+# Database name — must match NEO4J_initial_dbms_default__database in docker-compose.yml
 NEO4J_DATABASE=codebrain
 
-# "openai" (default) or "local" (offline)
+# ── Embedder ─────────────────────────────────────────────────────────────────
+# "openai"  → uses text-embedding-3-small (1536 dims), requires OPENAI_API_KEY
+# "local"   → uses bge-large-en-v1.5 offline (1024 dims), no API key needed
 EMBEDDER=openai
 OPENAI_API_KEY=sk-...
 
-# Optional -- enables AI root-cause analysis
+# ── AI root-cause analysis (optional) ────────────────────────────────────────
+# Required only for the diagnose_issue MCP tool
+# Get one at https://console.anthropic.com/
 ANTHROPIC_API_KEY=sk-ant-...
 ```
+
+> **Note:** If you change `NEO4J_PASSWORD` here, update `NEO4J_AUTH` in `docker-compose.yml` to match (format: `neo4j/<password>`).
+>
+> **Note:** If you switch `EMBEDDER` after indexing, run `npx tsx src/cli.ts reset-index` then re-index — the two backends use different vector dimensions.
 
 ### 4. Index a repo
 
