@@ -16,6 +16,7 @@ import path from 'node:path';
 import type { LanguageParser, ParseResult } from './base.js';
 import { emptyParseResult } from './base.js';
 import { JavaParser } from './java.js';
+import { TypeScriptParser } from './typescript.js';
 
 // ── Built-in parsers ──────────────────────────────────────────────────────────
 
@@ -29,6 +30,7 @@ function _register(parser: LanguageParser): void {
 
 // Register defaults
 _register(new JavaParser());
+_register(new TypeScriptParser());
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
