@@ -34,7 +34,7 @@ import type {
   try {
     const dir     = path.dirname(fileURLToPath(import.meta.url));
     const envPath = path.join(dir, '..', '.env');
-    const lines   = fs.readFileSync(envPath, 'utf8').split('\n');
+    const lines   = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
     for (const line of lines) {
       const m = line.match(/^\s*([\w]+)\s*=\s*(.*)$/);
       if (!m || !m[1]) continue;
