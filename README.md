@@ -82,7 +82,10 @@ npm run index -- /path/to/your/repo --ext .java,.ts --ignore dist,build
 
 | Command | Description |
 |---|---|
-| `npm run index -- <path>` | Scan, parse, and embed a local repo |
+| `npm run index -- <path>` | Scan, parse, and embed a local repo (high detail, default) |
+| `npm run index:low -- <path>` | Fast file-inventory index (no parsing, no embeddings) |
+| `npm run index:med -- <path>` | Class-level index (classes, interfaces, structural edges, embeddings) |
+| `npm run index:high -- <path>` | Full index — same as `npm run index` |
 | `npm run stats` | Show all indexed repos and node counts |
 | `npm run query -- --question "..."` | Natural-language search |
 | `npm run mcp` | Start the MCP server |
@@ -121,6 +124,105 @@ Add to `.claude/mcp.json` (project) or your global MCP config:
   }
 }
 ```
+
+---
+
+## Indexing levels
+
+Three levels control the trade-off between speed, storage, and query power. All three can coexist — each repo in the graph records the level it was indexed at, and you can upgrade a repo by re-running at a higher level (no `reset-index` required — that is only needed when switching embedding backends).
+
+### Level comparison
+
+| | `low` | `med` | `high` |
+|---|---|---|---|
+| **Speed** | Fastest (no parsing) | Fast | Slower (full parse + CALLS resolution) |
+| **Node types** | FILE | FILE, CLASS, INTERFACE | FILE, CLASS, INTERFACE, METHOD, FUNCTION |
+| **Edge types** | — | CONTAINS, DEFINES, IMPORTS, EXTENDS, IMPLEMENTS | All of med + CALLS, INJECTS, READS_CONFIG, READS_FIELD |
+| **Embeddings** | None | CLASS + INTERFACE | All code-bearing nodes |
+| **Source code stored** | None | Class body (up to 100 lines) | All bodies (up to 100 lines each) |
+| **Use case** | Quick file inventory, dependency map | Architecture exploration, class hierarchy, PR review | Deep call-chain tracing, incident diagnosis, semantic search |
+
+### What each level stores
+
+#### `low` — file inventory
+Stores one `FILE` node per scanned file. No AST parsing, no edges, no embeddings. Completes in seconds even for large repos.
+
+```
+(:CodeNode { type:"FILE", name:"OrderService.java", filePath:"src/.../OrderService.java", indexLevel:"low" })
+```
+
+#### `med` — structural graph
+Parses every file and stores:
+- **Nodes:** FILE, CLASS, INTERFACE
+- **Edges:** CONTAINS (file→class), DEFINES (class→method signature not stored), IMPORTS (file→file), EXTENDS, IMPLEMENTS
+- **Embeddings:** CLASS and INTERFACE nodes (enables semantic search on class descriptions)
+
+Class method bodies are **not** stored at `med` — you see class shapes but not inner logic.
+
+#### `high` — full knowledge graph
+Everything in `med`, plus:
+- **Nodes:** METHOD, FUNCTION (with full source body)
+- **Edges:** CALLS (resolved by name across the repo), INJECTS (CDI/Spring @Inject), READS_CONFIG, READS_FIELD
+- **Embeddings:** all code-bearing nodes (METHOD, FUNCTION, CLASS, INTERFACE)
+
+This is the level required by `diagnose_issue`, `get_node_context`, and deep semantic queries.
+
+---
+
+### Example queries per level
+
+#### `low` — find all files in a module
+```cypher
+MATCH (f:CodeNode {type:"FILE", repoName:"my-service"})
+WHERE f.filePath CONTAINS "payment"
+RETURN f.filePath
+```
+
+#### `med` — explore class hierarchy
+```cypher
+MATCH (c:CodeNode {type:"CLASS", repoName:"my-service"})-[:EXTENDS|IMPLEMENTS*1..3]->(p)
+RETURN c.name, p.name, p.type
+LIMIT 30
+```
+
+Find all classes in a package:
+```cypher
+MATCH (f:CodeNode {type:"FILE"})-[:CONTAINS]->(c:CodeNode {type:"CLASS", repoName:"my-service"})
+WHERE f.filePath CONTAINS "service"
+RETURN f.filePath, c.name
+```
+
+#### `high` — trace call chain to a method
+```cypher
+MATCH path = (caller:CodeNode)-[:CALLS*1..4]->
+             (target:CodeNode {name:"processPayment", repoName:"my-service"})
+RETURN [n in nodes(path) | n.name + " (" + n.filePath + ")"] AS chain
+```
+
+Find everything a method touches:
+```cypher
+MATCH (m:CodeNode {name:"placeOrder", repoName:"my-service", type:"METHOD"})
+OPTIONAL MATCH (m)-[:CALLS]->(called)
+OPTIONAL MATCH (m)-[:READS_CONFIG]->(cfg)
+RETURN m.sourceCode, collect(called.name) AS calls, collect(cfg) AS configs
+```
+
+---
+
+### Which level should each agent use?
+
+| Agent / use case | Recommended level | Reason |
+|---|---|---|
+| **Quick orientation on an unfamiliar repo** | `low` | Just want file structure, no parse overhead |
+| **PR review / architecture question** | `med` | Class/interface shapes are enough; method detail not needed |
+| **Finding where a class is defined or what it extends** | `med` | Structural edges cover it |
+| **Semantic "find code related to X"** | `med` or `high` | `med` covers class-level; `high` needed for method-level results |
+| **Incident diagnosis / root-cause from stack trace** | `high` | `diagnose_issue` tool requires METHOD nodes + CALLS edges |
+| **"What calls this method?"** | `high` | CALLS edges only exist at high |
+| **Finding a method's full implementation** | `high` | Source code only stored at high |
+| **Generating a full call graph** | `high` | CALLS resolution only at high |
+
+> **Tip:** For a new repo, run `index:low` first to get a file map instantly, then `index:high` when you need deep analysis. You don't need to reset between upgrades — re-running at a higher level replaces the existing graph for that repo.
 
 ---
 
