@@ -6,6 +6,9 @@
   "scripts": {
     "mcp": "tsx src/mcp.ts",
     "index": "tsx src/cli.ts index",
+    "index:low": "tsx src/cli.ts index --level low",
+    "index:med": "tsx src/cli.ts index --level med",
+    "index:high": "tsx src/cli.ts index --level high",
     "github": "tsx src/cli.ts github",
     "stats": "tsx src/cli.ts stats",
     "query": "tsx src/cli.ts query",
