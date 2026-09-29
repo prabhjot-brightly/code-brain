@@ -6,7 +6,7 @@
 
 ## What it does
 
-**code-brain** parses Java and TypeScript source with tree-sitter, stores every file, class, method, and function as a graph node in Neo4j, and draws edges for `CALLS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, and more. Each node gets a vector embedding so you can search by meaning, not just by name. The MCP server hands all of this to Claude so it can answer questions like "where is X defined?", trace call chains, or root-cause a production alert from a stack trace.
+**code-brain** parses Java, TypeScript, and C# (`.cs`) source with tree-sitter, stores every file, class, method, and function as a graph node in Neo4j, and draws edges for `CALLS`, `IMPORTS`, `EXTENDS`, `IMPLEMENTS`, and more. Each node gets a vector embedding so you can search by meaning, not just by name. The MCP server hands all of this to Claude so it can answer questions like "where is X defined?", trace call chains, or root-cause a production alert from a stack trace.
 
 ---
 
