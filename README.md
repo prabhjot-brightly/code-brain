@@ -131,7 +131,18 @@ Add to `.claude/mcp.json` (project) or your global MCP config:
 | `openai` (default) | `text-embedding-3-small` -- 1536 dims | Requires `OPENAI_API_KEY` |
 | `local` | `bge-large-en-v1.5` -- fully offline | Model cached in `~/.cache/repo-knowledge-graph/models` |
 
-Switching embedders changes vector dimensions. Run `reset-index` then re-index all repos.
+The difference is only in vector search quality — the graph structure (nodes, edges, CALLS, EXTENDS, etc.) is identical regardless of embedder.
+
+| | `local` (bge-large-en-v1.5) | `openai` (text-embedding-3-small) |
+|---|---|---|
+| Dims | 1024 | 1536 |
+| Quality | Good, especially for code | Slightly better semantic understanding |
+| Speed | Slow first run (model download), fast after | Fast (API call) |
+| Cost | Free | ~$0.02 / million tokens |
+
+**Practical impact:** when you run `query_codebase` with a natural language question, the semantic similarity ranking may differ slightly — OpenAI tends to handle paraphrasing and domain vocabulary better. Exact symbol lookups and structural traversal (CALLS chains, EXTENDS, etc.) are unaffected since those don't use embeddings at all.
+
+> **Note:** You cannot mix embedders. Switching changes vector dimensions — run `npm run reset-index` then re-index all repos.
 
 ---
 

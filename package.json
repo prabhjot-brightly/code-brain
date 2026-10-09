@@ -9,6 +9,7 @@
     "github": "tsx src/cli.ts github",
     "stats": "tsx src/cli.ts stats",
     "query": "tsx src/cli.ts query",
+    "reset-index": "tsx src/cli.ts reset-index",
     "test": "tsx --test test/parser.test.ts"
   },
   "keywords": [],
