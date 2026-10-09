@@ -30,19 +30,22 @@ program
   .description('Scan and index a local repository into Neo4j')
   .option('--ext <extensions>', 'Comma-separated extensions to index, e.g. ".py,.rb"')
   .option('--ignore <dirs>',    'Extra directory names to skip, comma-separated')
-  .action(async (repoPath: string, opts: { ext?: string; ignore?: string }) => {
+  .option('--level <level>',    'Indexing depth: low | med | high', 'high')
+  .action(async (repoPath: string, opts: { ext?: string; ignore?: string; level: string }) => {
     const absRepo  = path.resolve(repoPath);
     const repoName = path.basename(absRepo);
+    const level    = (opts.level ?? 'high') as 'low' | 'med' | 'high';
     const db       = new Neo4jDb();
     const indexer  = new Indexer(db);
 
     try {
       await db.init();
-      console.log(`Indexing ${absRepo} …`);
+      console.log(`Indexing ${absRepo} [level=${level}] …`);
 
       const result = await indexer.index({
         repoPath: absRepo,
         repoName,
+        level,
         scan: {
           extensions: parseExtensions(opts.ext),
           ignore: opts.ignore?.split(',').map((s) => s.trim()),
@@ -52,9 +55,11 @@ program
         `✓  ${result.filesScanned} files · ${result.nodesFound} nodes · ${result.edgesFound} edges (${result.durationMs}ms)`,
       );
 
-      console.log('Generating embeddings …');
-      const count = await indexer.embedNodes(absRepo, repoName);
-      console.log(`✓  ${count} embeddings stored in Neo4j`);
+      if (level !== 'low') {
+        console.log('Generating embeddings …');
+        const count = await indexer.embedNodes(absRepo, repoName, level);
+        console.log(`✓  ${count} embeddings stored in Neo4j`);
+      }
     } finally {
       await db.close();
     }
