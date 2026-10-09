@@ -6,9 +6,13 @@
   "scripts": {
     "mcp": "tsx src/mcp.ts",
     "index": "tsx src/cli.ts index",
+    "index:low": "tsx src/cli.ts index --level low",
+    "index:med": "tsx src/cli.ts index --level med",
+    "index:high": "tsx src/cli.ts index --level high",
     "github": "tsx src/cli.ts github",
     "stats": "tsx src/cli.ts stats",
     "query": "tsx src/cli.ts query",
+    "reset-index": "tsx src/cli.ts reset-index",
     "test": "tsx --test test/parser.test.ts"
   },
   "keywords": [],
@@ -25,6 +29,7 @@
     "neo4j-driver": "^6.2.0",
     "simple-git": "^3.36.0",
     "tree-sitter": "^0.21.1",
+    "tree-sitter-c-sharp": "^0.21.3",
     "tree-sitter-java": "^0.23.5",
     "tree-sitter-typescript": "^0.23.2",
     "zod": "^4.4.3"
