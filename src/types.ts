@@ -1,4 +1,13 @@
 export type NodeType = 'FILE' | 'CLASS' | 'FUNCTION' | 'METHOD' | 'INTERFACE';
+
+/**
+ * Controls how much detail is extracted and stored during indexing.
+ *
+ * - `low`  – FILE nodes only, no parsing, no embeddings. Fast file inventory.
+ * - `med`  – Adds CLASS and INTERFACE nodes, structural edges, class-level embeddings.
+ * - `high` – Full detail: all node types, CALLS resolution, method-level embeddings.
+ */
+export type IndexLevel = 'low' | 'med' | 'high';
 export type EdgeType =
   | 'CONTAINS'
   | 'DEFINES'
@@ -29,6 +38,8 @@ export interface CodeNode {
   qualifiedName?: string;
   /** Parser language identifier, for example `java` or `typescript`. */
   language?: string;
+  /** Indexing depth used when this node was last written. */
+  indexLevel?: IndexLevel;
   // ── Rich context stored in Neo4j ──────────────────────────────────────────
   repoName?:   string;    // e.g. "ei-erp-connect"
   repoPath?:   string;    // absolute path on disk
@@ -126,6 +137,8 @@ export interface IndexOptions {
   repoPath:  string;
   repoName?: string;
   scan?:     ScanOptions;
+  /** Indexing depth. Defaults to `'high'` (full detail). */
+  level?:    IndexLevel;
 }
 
 /** Full context assembled for one diagnosis request — input to the Analyzer. */

@@ -5,8 +5,32 @@ import { scanRepository } from './scanner.js';
 import { parseFile } from './parser.js';
 import { Neo4jDb } from './neo4j-database.js';
 import { embedTexts, nodeToText } from './embedder.js';
-import type { IndexOptions, IndexResult, CodeNode, CodeEdge } from './types.js';
+import type { IndexOptions, IndexResult, CodeNode, CodeEdge, IndexLevel, NodeType, EdgeType } from './types.js';
 import type { ParseResult } from './parsers/base.js';
+
+// ── Level filtering ───────────────────────────────────────────────────────────
+
+const NODE_TYPES_BY_LEVEL: Record<IndexLevel, Set<NodeType>> = {
+  low:  new Set(['FILE']),
+  med:  new Set(['FILE', 'CLASS', 'INTERFACE']),
+  high: new Set(['FILE', 'CLASS', 'INTERFACE', 'METHOD', 'FUNCTION']),
+};
+
+/** Edge types written per level. LOW stores no edges (file inventory only). */
+const EDGE_TYPES_BY_LEVEL: Record<IndexLevel, Set<EdgeType>> = {
+  low:  new Set(),
+  med:  new Set(['CONTAINS', 'DEFINES', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS']),
+  high: new Set(['CONTAINS', 'DEFINES', 'IMPORTS', 'CALLS', 'EXTENDS', 'IMPLEMENTS', 'INJECTS', 'READS_CONFIG', 'READS_FIELD']),
+};
+
+/** Node types that receive vector embeddings per level. */
+const EMBED_TYPES_BY_LEVEL: Record<IndexLevel, NodeType[]> = {
+  low:  [],
+  med:  ['CLASS', 'INTERFACE'],
+  high: ['METHOD', 'FUNCTION', 'CLASS', 'INTERFACE'],
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Maximum lines of source code stored per node in Neo4j.
@@ -54,113 +78,142 @@ export class Indexer {
   async index(opts: IndexOptions): Promise<IndexResult> {
     const start    = Date.now();
     const repoName = opts.repoName ?? path.basename(opts.repoPath);
+    const level: IndexLevel = opts.level ?? 'high';
+    const allowedNodeTypes = NODE_TYPES_BY_LEVEL[level];
+    const allowedEdgeTypes = EDGE_TYPES_BY_LEVEL[level];
 
-    process.stderr.write(`[indexer] clearing existing data for repo "${repoName}"…\n`);
+    process.stderr.write(`[indexer] clearing existing data for repo "${repoName}" (level: ${level})…\n`);
     await this.db.clearRepo(repoName);
 
     const filePaths = scanRepository(opts.repoPath, opts.scan);
-    process.stderr.write(`[indexer] scanning ${filePaths.length} files…\n`);
+    process.stderr.write(`[indexer] scanning ${filePaths.length} files at level=${level}…\n`);
 
     const allNodes:          CodeNode[] = [];
     const allEdges:          CodeEdge[] = [];
-    // Second-pass name references — collected across all files, resolved after
-    // all nodes are stored (same two-pass pattern used by codegraph).
     const allExtendsRefs:    CodeEdge[] = [];
     const allImplementsRefs: CodeEdge[] = [];
     const allInjectsRefs:    CodeEdge[] = [];
 
-    for (const absPath of filePaths) {
-      try {
-        const parsed: ParseResult = parseFile(absPath, opts.repoPath);
-        const ids = new Map(parsed.nodes.map(node => [node.id, `${repoName}::${node.id}`]));
-
-        let sourceLines: string[] = [];
+    if (level === 'low') {
+      // Fast path — no parsing. Just emit one FILE node per scanned file.
+      for (const absPath of filePaths) {
+        const relPath = path.relative(opts.repoPath, absPath).replace(/\\/g, '/');
+        allNodes.push({
+          id:         `${repoName}::${relPath}:FILE:${relPath}:0`,
+          type:       'FILE',
+          name:       path.basename(absPath),
+          filePath:   relPath,
+          startLine:  1,
+          endLine:    1,
+          hash:       '',
+          repoName,
+          repoPath:   opts.repoPath,
+          sourceCode: '',
+          firstLine:  '',
+          indexLevel: 'low',
+        });
+      }
+    } else {
+      for (const absPath of filePaths) {
         try {
-          sourceLines = fs.readFileSync(absPath, 'utf8').split('\n');
-        } catch {
-          // unreadable — nodes will have empty sourceCode
-        }
+          const parsed: ParseResult = parseFile(absPath, opts.repoPath);
+          const ids = new Map(parsed.nodes.map(node => [node.id, `${repoName}::${node.id}`]));
 
-        for (const node of parsed.nodes) {
-          let sourceCode = '';
-          let firstLine  = '';
+          let sourceLines: string[] = [];
+          try {
+            sourceLines = fs.readFileSync(absPath, 'utf8').split('\n');
+          } catch {
+            // unreadable — nodes will have empty sourceCode
+          }
 
-          if (node.type !== 'FILE' && sourceLines.length > 0) {
-            const lineStart = node.startLine - 1;
-            const lineEnd   = Math.min(node.endLine, lineStart + SOURCE_CODE_MAX_LINES);
-            sourceCode      = sourceLines.slice(lineStart, lineEnd).join('\n');
-            firstLine       = (sourceLines[lineStart] ?? '').trim().slice(0, 500);
-          } else if (node.type === 'FILE' && sourceLines.length > 0) {
-            firstLine = (sourceLines[0] ?? '').trim().slice(0, 500);
-            if (isConfigurationFile(absPath)) {
-              sourceCode = sourceLines.slice(0, SOURCE_CODE_MAX_LINES).join('\n');
+          for (const node of parsed.nodes) {
+            if (!allowedNodeTypes.has(node.type)) continue;
+
+            let sourceCode = '';
+            let firstLine  = '';
+
+            if (node.type !== 'FILE' && sourceLines.length > 0) {
+              const lineStart = node.startLine - 1;
+              const lineEnd   = Math.min(node.endLine, lineStart + SOURCE_CODE_MAX_LINES);
+              sourceCode      = sourceLines.slice(lineStart, lineEnd).join('\n');
+              firstLine       = (sourceLines[lineStart] ?? '').trim().slice(0, 500);
+            } else if (node.type === 'FILE' && sourceLines.length > 0) {
+              firstLine = (sourceLines[0] ?? '').trim().slice(0, 500);
+              if (isConfigurationFile(absPath)) {
+                sourceCode = sourceLines.slice(0, SOURCE_CODE_MAX_LINES).join('\n');
+              }
+            }
+
+            allNodes.push({
+              ...node,
+              id:         ids.get(node.id)!,
+              repoName,
+              repoPath:   opts.repoPath,
+              sourceCode,
+              firstLine,
+              indexLevel: level,
+            });
+          }
+
+          for (const edge of parsed.edges) {
+            if (!allowedEdgeTypes.has(edge.type)) continue;
+            allEdges.push({
+              ...edge,
+              source: ids.get(edge.source) ?? edge.source,
+              target: edge.type === 'CALLS' || edge.type === 'READS_CONFIG'
+                ? edge.target
+                : (ids.get(edge.target) ?? edge.target),
+            });
+          }
+
+          if (allowedEdgeTypes.has('EXTENDS')) {
+            for (const ref of parsed.extendsRefs) {
+              allExtendsRefs.push({
+                source:     `${repoName}::${ref.sourceId}`,
+                target:     ref.targetName,
+                type:       'EXTENDS',
+                confidence: 1.0,
+                resolution: 'ast',
+              });
+            }
+            for (const ref of parsed.implementsRefs) {
+              allImplementsRefs.push({
+                source:     `${repoName}::${ref.sourceId}`,
+                target:     ref.targetName,
+                type:       'IMPLEMENTS',
+                confidence: 1.0,
+                resolution: 'ast',
+              });
             }
           }
 
-          allNodes.push({
-            ...node,
-            id:       ids.get(node.id)!,
-            repoName,
-            repoPath: opts.repoPath,
-            sourceCode,
-            firstLine,
-          });
-        }
+          if (allowedEdgeTypes.has('INJECTS')) {
+            for (const ref of parsed.injectsRefs) {
+              allInjectsRefs.push({
+                source:     `${repoName}::${ref.sourceId}`,
+                target:     ref.targetName,
+                type:       'INJECTS',
+                confidence: 1.0,
+                resolution: 'ast',
+              });
+            }
+          }
 
-        for (const edge of parsed.edges) {
-          allEdges.push({
-            ...edge,
-            source: ids.get(edge.source) ?? edge.source,
-            // CALLS edges use a name as target — don't remap through ids
-            target: edge.type === 'CALLS' || edge.type === 'READS_CONFIG'
-              ? edge.target
-              : (ids.get(edge.target) ?? edge.target),
-          });
+        } catch (err) {
+          process.stderr.write(`[indexer] skipping ${absPath}: ${String(err)}\n`);
         }
-
-        // Collect second-pass name refs (targets are class/interface names, not IDs)
-        for (const ref of parsed.extendsRefs) {
-          allExtendsRefs.push({
-            source:     `${repoName}::${ref.sourceId}`,
-            target:     ref.targetName,
-            type:       'EXTENDS',
-            confidence: 1.0,
-            resolution: 'ast',
-          });
-        }
-        for (const ref of parsed.implementsRefs) {
-          allImplementsRefs.push({
-            source:     `${repoName}::${ref.sourceId}`,
-            target:     ref.targetName,
-            type:       'IMPLEMENTS',
-            confidence: 1.0,
-            resolution: 'ast',
-          });
-        }
-        for (const ref of parsed.injectsRefs) {
-          allInjectsRefs.push({
-            source:     `${repoName}::${ref.sourceId}`,
-            target:     ref.targetName,
-            type:       'INJECTS',
-            confidence: 1.0,
-            resolution: 'ast',
-          });
-        }
-
-      } catch (err) {
-        process.stderr.write(`[indexer] skipping ${absPath}: ${String(err)}\n`);
       }
     }
 
     await this.db.batchUpsertNodes(allNodes);
 
-    // Separate CALLS edges — name-based, resolved after all nodes are stored.
-    // EXTENDS/IMPLEMENTS refs are also name-based and handled separately.
     const callEdges  = allEdges.filter(e => e.type === 'CALLS');
     const otherEdges = allEdges.filter(e => e.type !== 'CALLS' && e.type !== 'EXTENDS' && e.type !== 'IMPLEMENTS');
 
-    process.stderr.write(`[indexer] writing ${otherEdges.length} structural edges to Neo4j…\n`);
-    await this.db.batchUpsertEdges(otherEdges);
+    if (otherEdges.length > 0) {
+      process.stderr.write(`[indexer] writing ${otherEdges.length} structural edges to Neo4j…\n`);
+      await this.db.batchUpsertEdges(otherEdges);
+    }
 
     if (callEdges.length > 0) {
       process.stderr.write(`[indexer] resolving ${callEdges.length} CALLS edges by name…\n`);
@@ -178,7 +231,7 @@ export class Indexer {
     return {
       filesScanned: filePaths.length,
       nodesFound:   allNodes.length,
-      edgesFound:   allEdges.length,   // includes both structural + CALLS
+      edgesFound:   allEdges.length,
       findingsFound: 0,
       durationMs:   Date.now() - start,
     };
@@ -197,17 +250,13 @@ export class Indexer {
   async embedNodes(
     _repoPath: string,   // kept for API compatibility; source is in Neo4j now
     repoName:  string,
+    level: IndexLevel = 'high',
   ): Promise<number> {
-    // Pull only the node types that carry actual logic
-    const [methods, functions, classes, interfaces] = await Promise.all([
-      this.db.nodesByType('METHOD',    repoName),
-      this.db.nodesByType('FUNCTION',  repoName),
-      this.db.nodesByType('CLASS',     repoName),
-      this.db.nodesByType('INTERFACE', repoName),
-    ]);
+    const types = EMBED_TYPES_BY_LEVEL[level];
+    if (types.length === 0) return 0;
 
-    const targets = [...methods, ...functions, ...classes, ...interfaces]
-      .filter(shouldEmbed);
+    const buckets = await Promise.all(types.map(t => this.db.nodesByType(t, repoName)));
+    const targets = buckets.flat().filter(shouldEmbed);
 
     if (targets.length === 0) return 0;
 

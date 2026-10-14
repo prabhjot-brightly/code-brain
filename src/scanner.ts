@@ -7,7 +7,17 @@ const DEFAULT_IGNORE = new Set([
   '.next', '__pycache__', '.venv', 'venv', 'env',
   'vendor', 'target', '.gradle', '.idea', '.vscode',
   'bin', 'obj', 'out', 'tmp', '.cache',
+  // test directories
+  '__tests__', '__mocks__', 'test', 'tests', 'spec', 'specs', 'e2e', 'cypress',
 ]);
+
+/** File name suffixes that identify test / mock files — skipped regardless of directory. */
+const TEST_SUFFIXES = [
+  '.test.ts', '.test.tsx', '.test.js', '.test.jsx',
+  '.spec.ts', '.spec.tsx', '.spec.js', '.spec.jsx',
+  '.test.mjs', '.spec.mjs',
+  '-test.ts', '-test.js',
+];
 
 // Every mainstream language — works for any repo out of the box
 const DEFAULT_EXTENSIONS = new Set([
@@ -79,9 +89,12 @@ export function scanRepository(root: string, opts?: ScanOptions): string[] {
         continue;
       }
 
+      const lowerName = entry.name.toLowerCase();
+      if (TEST_SUFFIXES.some(s => lowerName.endsWith(s))) continue;
+
       if (
         extensions.has(path.extname(entry.name).toLowerCase()) ||
-        DEFAULT_FILENAMES.has(entry.name.toLowerCase())
+        DEFAULT_FILENAMES.has(lowerName)
       ) {
         result.push(fullPath);
       }

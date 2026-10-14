@@ -3,7 +3,7 @@
     "repo-knowledge-graph": {
       "command": "npx",
       "args": ["tsx", "src/mcp.ts"],
-      "cwd": "C:\\Users\\z004sc4w\\work\\repo-knowledge-graph"
+      "cwd": "."
     }
   }
 }
